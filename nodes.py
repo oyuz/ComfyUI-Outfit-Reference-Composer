@@ -6,8 +6,6 @@ from PIL import Image, ImageFilter, ImageDraw
 SLOTS = ("top", "bottom", "shoes", "hat", "bag", "glasses", "necklace", "earrings", "bracelet")
 
 class OutfitReferenceComposer:
-    """Deterministically composes selected product images into a flat outfit reference."""
-
     @classmethod
     def INPUT_TYPES(cls):
         required = {
@@ -52,8 +50,10 @@ class OutfitReferenceComposer:
         return items
 
     @staticmethod
-    def _zone(slot, length):
+    def _zone(slot, length, coverage=None):
         if slot == "top":
+            if coverage == "show_midriff":
+                return (.25, .17, .75, .41)
             return {"crop": (.24, .17, .76, .46), "waist": (.22, .17, .78, .53), "hip": (.20, .17, .80, .60)}.get(length, (.22, .17, .78, .53))
         if slot == "bottom":
             return {"thigh": (.27, .48, .73, .66), "knee": (.26, .48, .74, .75), "calf": (.25, .48, .75, .82), "ankle": (.24, .48, .76, .89), "floor": (.24, .48, .76, .91), "full": (.24, .48, .76, .89)}.get(length, (.24, .48, .76, .89))
@@ -73,26 +73,27 @@ class OutfitReferenceComposer:
             if cutout is None:
                 continue
             length = layout.get("length", "waist")
-            x0, y0, x1, y1 = self._zone(slot, length)
-            x0, y0, x1, y1 = (int(width * x0), int(height * y0), int(width * x1), int(height * y1))
-            zone_w, zone_h = x1 - x0, y1 - y0
-            fit = layout.get("fit", "regular")
-            fit_width = {"slim": .88, "regular": 1, "loose": 1, "oversized": 1}.get(fit, 1)
+            coverage = layout.get("coverage")
+            x0, y0, x1, y1 = self._zone(slot, length, coverage)
+            x0, y0, x1, y1 = (int(width*x0), int(height*y0), int(width*x1), int(height*y1))
+            zone_w, zone_h = x1-x0, y1-y0
+            fit_width = {"slim": .88, "regular": 1, "loose": 1, "oversized": 1}.get(layout.get("fit", "regular"), 1)
             if slot == "bottom":
                 fit_width *= {"slim": .86, "straight": .95, "wide": 1.0, "baggy": 1.0}.get(layout.get("silhouette"), 1)
-            scale = min((zone_w * fit_width) / cutout.width, zone_h / cutout.height)
-            target_width, target_height = max(1, int(cutout.width * scale)), max(1, int(cutout.height * scale))
+            scale = min((zone_w*fit_width)/cutout.width, zone_h/cutout.height)
+            target_width, target_height = max(1, int(cutout.width*scale)), max(1, int(cutout.height*scale))
             cutout = cutout.resize((target_width, target_height), Image.Resampling.LANCZOS)
-            x = x0 + (zone_w - target_width) // 2
-            top = y1 - target_height if slot in ("top", "shoes") else y0 + (zone_h - target_height) // 2
+            x = x0 + (zone_w-target_width)//2
+            top = y1-target_height if slot in ("top", "shoes") else y0+(zone_h-target_height)//2
             if guides:
-                guides.rectangle((x0, y0, x1, y1), outline=(255, 45, 45, 255), width=max(1, width // 384))
-                guides.text((x0 + 4, y0 + 4), f"{slot}:{length}", fill=(255, 45, 45, 255))
-            shadow = Image.new("RGBA", (target_width, target_height), (0, 0, 0, 0))
-            shadow.putalpha(cutout.getchannel("A").filter(ImageFilter.GaussianBlur(3)).point(lambda p: p // 7))
-            canvas.alpha_composite(shadow, (x + 3, top + 5))
-            canvas.alpha_composite(cutout, (x, top))
-        output = torch.from_numpy(np.asarray(canvas.convert("RGB")).astype(np.float32) / 255.0).unsqueeze(0)
+                guides.rectangle((x0, y0, x1, y1), outline=(255,45,45,255), width=max(1,width//384))
+                label = f"{slot}:{length}" + (f"/{coverage}" if coverage else "")
+                guides.text((x0+4,y0+4), label, fill=(255,45,45,255))
+            shadow = Image.new("RGBA", (target_width,target_height), (0,0,0,0))
+            shadow.putalpha(cutout.getchannel("A").filter(ImageFilter.GaussianBlur(3)).point(lambda p:p//7))
+            canvas.alpha_composite(shadow, (x+3,top+5))
+            canvas.alpha_composite(cutout, (x,top))
+        output = torch.from_numpy(np.asarray(canvas.convert("RGB")).astype(np.float32)/255.0).unsqueeze(0)
         return (output,)
 
 NODE_CLASS_MAPPINGS = {"OutfitReferenceComposer": OutfitReferenceComposer}
