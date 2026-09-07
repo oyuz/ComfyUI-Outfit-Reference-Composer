@@ -28,7 +28,12 @@ class OutfitReferenceComposer:
     @staticmethod
     def _cutout(image):
         data = np.asarray(image).astype(np.int16)
-        alpha = np.where(np.min(data, axis=2)>244, 0, 255).astype(np.uint8)
+        marker = image.copy()
+        background_marker = (0, 0, 0)
+        for point in ((0, 0), (image.width - 1, 0), (0, image.height - 1), (image.width - 1, image.height - 1)):
+            ImageDraw.floodfill(marker, point, background_marker, thresh=24)
+        marked = np.asarray(marker)
+        alpha = np.where(np.all(marked == background_marker, axis=2), 0, 255).astype(np.uint8)
         bbox = Image.fromarray(alpha).getbbox()
         if not bbox: return None
         rgba = image.convert("RGBA")
