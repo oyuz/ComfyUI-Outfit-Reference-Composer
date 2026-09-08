@@ -1,6 +1,7 @@
 import json
 import sys
 import unittest
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,12 @@ from nodes import OutfitReferenceComposer, SLOTS, TEMPLATE  # noqa: E402
 def image_tensor(image):
     array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
     return torch.from_numpy(array).unsqueeze(0)
+
+
+def axis_change(source, placement):
+    source_aspect = source.width / source.height
+    target_aspect = placement[2] / placement[3]
+    return max(source_aspect / target_aspect, target_aspect / source_aspect)
 
 
 class OutfitReferenceComposerTests(unittest.TestCase):
@@ -37,73 +44,186 @@ class OutfitReferenceComposerTests(unittest.TestCase):
         self.assertLess(cutout.width, 260)
         self.assertLess(cutout.height, 360)
 
-    def test_same_fit_uses_same_effective_shoulder_width(self):
-        short_top = Image.new("RGBA", (680, 480), (80, 20, 20, 255))
-        long_top = Image.new("RGBA", (530, 650), (30, 80, 130, 255))
-        short_placement, _, _ = self.node._top_placement(
-            short_top,
-            {"garment_type": "jersey", "sleeve_length": "short", "fit": "loose", "length": "crop"},
-            768,
-            1024,
-        )
-        long_placement, _, _ = self.node._top_placement(
-            long_top,
-            {"garment_type": "shirt", "sleeve_length": "long", "fit": "loose", "length": "hip"},
-            768,
-            1024,
-        )
-        short_shoulder = short_placement[2] * 0.68
-        long_shoulder = long_placement[2] * 0.65
-        self.assertLess(abs(short_shoulder - long_shoulder), 1)
+    def test_top_resize_preserves_source_aspect(self):
+        for cutout, layout in (
+            (
+                Image.new("RGBA", (680, 480), (80, 20, 20, 255)),
+                {"garment_type": "jersey", "fit": "loose", "length": "crop"},
+            ),
+            (
+                Image.new("RGBA", (530, 650), (30, 80, 130, 255)),
+                {"garment_type": "shirt", "fit": "loose", "length": "hip"},
+            ),
+        ):
+            placement, _, _ = self.node._top_placement(cutout, layout, 768, 1024)
+            self.assertLessEqual(axis_change(cutout, placement), 1.02)
 
-    def test_top_neck_and_hem_are_hard_vertical_anchors(self):
-        cutout = Image.new("RGBA", (530, 650), (30, 80, 130, 255))
-        placement, _, _ = self.node._top_placement(
-            cutout,
-            {"garment_type": "shirt", "sleeve_length": "long", "fit": "loose", "length": "hip"},
-            768,
-            1024,
-        )
-        expected_top = round(TEMPLATE["landmarks"]["neck_y"] * 1024)
-        expected_bottom = round(TEMPLATE["landmarks"]["top_hem_y"]["hip"] * 1024)
-        self.assertLessEqual(abs(placement[1] - expected_top), 1)
-        self.assertLessEqual(abs(placement[1] + placement[3] - expected_bottom), 1)
-
-    def test_bottom_waist_and_hem_are_hard_vertical_anchors(self):
+    def test_bottom_resize_preserves_source_aspect(self):
         cutout = Image.new("RGBA", (300, 600), (80, 80, 80, 255))
         placement, _, _ = self.node._bottom_placement(
             cutout,
-            {"fit": "oversized", "waist": "low", "length": "floor", "silhouette": "baggy"},
+            {"garment_type": "pants", "fit": "oversized", "waist": "low", "length": "floor", "silhouette": "baggy"},
             768,
             1024,
         )
-        expected_top = round(TEMPLATE["landmarks"]["bottom_waist_y"]["low"] * 1024)
-        expected_bottom = round(TEMPLATE["landmarks"]["bottom_hem_y"]["floor"] * 1024)
-        self.assertLessEqual(abs(placement[1] - expected_top), 1)
-        self.assertLessEqual(abs(placement[1] + placement[3] - expected_bottom), 1)
+        self.assertLessEqual(axis_change(cutout, placement), 1.02)
 
-    def test_same_bottom_metadata_ignores_product_shot_aspect(self):
+    def test_product_shot_aspect_is_not_normalized_away(self):
         narrow = Image.new("RGBA", (360, 400), (80, 80, 80, 255))
         wide = Image.new("RGBA", (620, 420), (80, 80, 80, 255))
-        layout = {"fit": "loose", "waist": "mid", "length": "knee", "silhouette": "wide"}
+        layout = {"garment_type": "shorts", "fit": "loose", "waist": "mid", "length": "knee", "silhouette": "wide"}
         narrow_placement, _, _ = self.node._bottom_placement(narrow, layout, 768, 1024)
         wide_placement, _, _ = self.node._bottom_placement(wide, layout, 768, 1024)
-        self.assertEqual(narrow_placement[2:], wide_placement[2:])
+        self.assertLessEqual(axis_change(narrow, narrow_placement), 1.02)
+        self.assertLessEqual(axis_change(wide, wide_placement), 1.02)
+        self.assertNotEqual(narrow_placement[2:], wide_placement[2:])
 
-    def test_extreme_axis_distortion_is_rejected(self):
+    def test_extreme_aspect_is_contained_without_distortion(self):
         extreme = Image.new("RGBA", (1000, 100), (80, 80, 80, 255))
-        with self.assertRaisesRegex(ValueError, "axis distortion"):
-            self.node._top_placement(
-                extreme,
-                {"garment_type": "shirt", "fit": "regular", "length": "hip"},
+        placement, hard, _ = self.node._top_placement(
+            extreme,
+            {"garment_type": "shirt", "fit": "regular", "length": "hip", "max_axis_distortion": 4},
+            768,
+            1024,
+        )
+        self.assertLessEqual(axis_change(extreme, placement), 1.02)
+        self.assertLessEqual(placement[2], hard[2] - hard[0])
+
+    def test_packed_main_slots_do_not_overlap(self):
+        top = Image.new("RGBA", (400, 320), (80, 80, 80, 255))
+        bottom = Image.new("RGBA", (260, 500), (80, 80, 80, 255))
+        shoes = Image.new("RGBA", (300, 350), (80, 80, 80, 255))
+        layouts = {
+            "top": {"garment_type": "shirt", "fit": "oversized", "length": "upper_thigh"},
+            "bottom": {"garment_type": "pants", "fit": "oversized", "length": "floor", "silhouette": "baggy"},
+            "shoes": {"size": "large"},
+        }
+        placements = {
+            "top": self.node._top_placement(top, layouts["top"], 768, 1024),
+            "bottom": self.node._bottom_placement(bottom, layouts["bottom"], 768, 1024),
+            "shoes": self.node._box_placement("shoes", shoes, layouts["shoes"], 768, 1024),
+        }
+        packed = self.node._pack_main(placements, layouts, 768, 1024)
+        previous_bottom = None
+        for slot in ("top", "bottom", "shoes"):
+            placement, hard, _ = packed[slot]
+            if previous_bottom is not None:
+                self.assertGreaterEqual(placement[1] - previous_bottom, 8)
+            self.assertGreaterEqual(placement[0], hard[0])
+            self.assertLessEqual(placement[0] + placement[2], hard[2])
+            previous_bottom = placement[1] + placement[3]
+        self.assertLessEqual(previous_bottom, round(TEMPLATE["main_bottom_y"] * 1024))
+
+    def test_bottom_waist_levels_are_anchored_above_shared_hip_axis(self):
+        bottom = Image.new("RGBA", (300, 500), (80, 80, 80, 255))
+        positions = {}
+        for waist in ("high", "mid", "low"):
+            placement, _, _ = self.node._bottom_placement(
+                bottom,
+                {
+                    "garment_type": "pants",
+                    "fit": "regular",
+                    "waist": waist,
+                    "length": "floor",
+                    "silhouette": "straight",
+                },
                 768,
                 1024,
             )
+            positions[waist] = placement[1]
 
-    def test_main_slot_boxes_do_not_overlap(self):
-        boxes = TEMPLATE["hard_boxes"]
-        self.assertLessEqual(boxes["top"][3], boxes["bottom"][1])
-        self.assertLessEqual(boxes["bottom"][3], boxes["shoes"][1])
+        self.assertLess(positions["high"], positions["mid"])
+        self.assertLess(positions["mid"], positions["low"])
+        hip_y = round(TEMPLATE["landmarks"]["hip_y"] * 1024)
+        for waist, y in positions.items():
+            expected = round(
+                (
+                    TEMPLATE["landmarks"]["hip_y"]
+                    - TEMPLATE["landmarks"]["waist_offset_from_hip"][waist]
+                )
+                * 1024
+            )
+            self.assertEqual(y, expected)
+            self.assertLess(y, hip_y)
+
+    def test_isolated_shoes_keep_fixed_foot_anchor(self):
+        shoes = Image.new("RGBA", (300, 350), (80, 80, 80, 255))
+        layouts = {"shoes": {"size": "large"}}
+        original = self.node._box_placement("shoes", shoes, layouts["shoes"], 768, 1024)
+        packed = self.node._pack_main({"shoes": original}, layouts, 768, 1024)
+        self.assertEqual(packed["shoes"][0], original[0])
+
+    def test_missing_bottom_does_not_pull_shoes_below_top(self):
+        top = Image.new("RGBA", (400, 360), (80, 80, 80, 255))
+        shoes = Image.new("RGBA", (300, 350), (80, 80, 80, 255))
+        layouts = {
+            "top": {"garment_type": "shirt", "fit": "regular", "length": "waist"},
+            "shoes": {"size": "large"},
+        }
+        shoe_original = self.node._box_placement("shoes", shoes, layouts["shoes"], 768, 1024)
+        placements = {
+            "top": self.node._top_placement(top, layouts["top"], 768, 1024),
+            "shoes": shoe_original,
+        }
+        packed = self.node._pack_main(placements, layouts, 768, 1024)
+        self.assertEqual(packed["shoes"][0], shoe_original[0])
+        top_box = packed["top"][0]
+        shoe_box = packed["shoes"][0]
+        self.assertGreater(shoe_box[1], top_box[1] + top_box[3])
+
+    def test_every_main_slot_subset_stays_inside_and_nonoverlapping(self):
+        cutouts = {
+            "top": Image.new("RGBA", (400, 360), (80, 80, 80, 255)),
+            "bottom": Image.new("RGBA", (340, 360), (80, 80, 80, 255)),
+            "socks": Image.new("RGBA", (220, 300), (230, 230, 230, 255)),
+            "shoes": Image.new("RGBA", (300, 350), (80, 80, 80, 255)),
+        }
+        layouts = {
+            "top": {"garment_type": "shirt", "fit": "regular", "length": "waist"},
+            "bottom": {
+                "garment_type": "shorts",
+                "fit": "regular",
+                "waist": "mid",
+                "length": "knee",
+                "silhouette": "straight",
+            },
+            "socks": {"length": "mid_calf"},
+            "shoes": {"size": "large"},
+        }
+        all_placements = {
+            "top": self.node._top_placement(cutouts["top"], layouts["top"], 768, 1024),
+            "bottom": self.node._bottom_placement(
+                cutouts["bottom"], layouts["bottom"], 768, 1024
+            ),
+            "socks": self.node._socks_placement(
+                cutouts["socks"], layouts["socks"], layouts["bottom"], 768, 1024, True
+            ),
+            "shoes": self.node._box_placement(
+                "shoes", cutouts["shoes"], layouts["shoes"], 768, 1024
+            ),
+        }
+
+        slots = tuple(all_placements)
+        for count in range(1, len(slots) + 1):
+            for subset in combinations(slots, count):
+                with self.subTest(subset=subset):
+                    packed = self.node._pack_main(
+                        {slot: all_placements[slot] for slot in subset}, layouts, 768, 1024
+                    )
+                    boxes = [packed[slot][0] for slot in subset]
+                    for box in boxes:
+                        self.assertGreaterEqual(box[0], 0)
+                        self.assertGreaterEqual(box[1], 0)
+                        self.assertLessEqual(box[0] + box[2], 768)
+                        self.assertLessEqual(box[1] + box[3], 1024)
+                    for first, second in combinations(boxes, 2):
+                        horizontal_overlap = min(first[0] + first[2], second[0] + second[2]) - max(
+                            first[0], second[0]
+                        )
+                        vertical_overlap = min(first[1] + first[3], second[1] + second[3]) - max(
+                            first[1], second[1]
+                        )
+                        self.assertFalse(horizontal_overlap > 0 and vertical_overlap > 0)
 
     def test_earring_boxes_are_above_top_and_clear_of_glasses(self):
         boxes = TEMPLATE["hard_boxes"]
@@ -160,24 +280,23 @@ class OutfitReferenceComposerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "calf/ankle/floor"):
             self.node._socks_placement(cutout, {"length": "crew"}, {}, 768, 1024, True)
 
-    def test_short_bottom_and_socks_hard_boxes_do_not_overlap(self):
+    def test_short_bottom_and_socks_are_packed_without_overlap(self):
         bottom = Image.new("RGBA", (360, 250), (80, 80, 80, 255))
         socks = Image.new("RGBA", (220, 300), (230, 230, 230, 255))
-        _, bottom_hard, _ = self.node._bottom_placement(
-            bottom,
-            {"fit": "loose", "waist": "low", "length": "knee", "silhouette": "wide"},
-            768,
-            1024,
-        )
-        _, socks_hard, _ = self.node._socks_placement(
-            socks,
-            {"length": "mid_calf"},
-            {"garment_type": "shorts", "length": "knee"},
-            768,
-            1024,
-            True,
-        )
-        self.assertLessEqual(bottom_hard[3], socks_hard[1])
+        layouts = {
+            "bottom": {"garment_type": "shorts", "fit": "loose", "waist": "low", "length": "knee", "silhouette": "wide"},
+            "socks": {"length": "mid_calf"},
+        }
+        placements = {
+            "bottom": self.node._bottom_placement(bottom, layouts["bottom"], 768, 1024),
+            "socks": self.node._socks_placement(
+                socks, layouts["socks"], layouts["bottom"], 768, 1024, True
+            ),
+        }
+        packed = self.node._pack_main(placements, layouts, 768, 1024)
+        bottom_box = packed["bottom"][0]
+        socks_box = packed["socks"][0]
+        self.assertGreaterEqual(socks_box[1] - (bottom_box[1] + bottom_box[3]), 8)
 
     def test_compose_accepts_direct_item_fields(self):
         product = Image.new("RGB", (256, 256), "white")
@@ -236,6 +355,84 @@ class OutfitReferenceComposerTests(unittest.TestCase):
         self.assertIn("/crop", crop_label)
         self.assertIn("/hip", hip_label)
         self.assertLess(crop[3], hip[3])
+
+    def test_fit_and_length_change_uniform_top_scale_monotonically(self):
+        cutout = Image.new("RGBA", (400, 420), (80, 80, 80, 255))
+        widths = []
+        for fit in ("slim", "regular", "loose", "oversized"):
+            placement, _, _ = self.node._top_placement(
+                cutout,
+                {"garment_type": "shirt", "fit": fit, "length": "waist"},
+                768,
+                1024,
+            )
+            widths.append(placement[2])
+            self.assertLessEqual(axis_change(cutout, placement), 1.02)
+        self.assertEqual(widths, sorted(widths))
+        self.assertEqual(len(widths), len(set(widths)))
+
+        heights = []
+        for length in ("crop", "waist", "hip", "upper_thigh"):
+            placement, _, _ = self.node._top_placement(
+                cutout,
+                {"garment_type": "shirt", "fit": "regular", "length": length},
+                768,
+                1024,
+            )
+            heights.append(placement[3])
+        self.assertEqual(heights, sorted(heights))
+        self.assertEqual(len(heights), len(set(heights)))
+
+    def test_bottom_fit_and_length_change_uniform_scale_monotonically(self):
+        cutout = Image.new("RGBA", (300, 500), (80, 80, 80, 255))
+        widths = []
+        for fit in ("slim", "regular", "loose", "oversized"):
+            placement, _, _ = self.node._bottom_placement(
+                cutout,
+                {"garment_type": "pants", "fit": fit, "length": "calf", "silhouette": "straight"},
+                768,
+                1024,
+            )
+            widths.append(placement[2])
+            self.assertLessEqual(axis_change(cutout, placement), 1.02)
+        self.assertEqual(widths, sorted(widths))
+        self.assertEqual(len(widths), len(set(widths)))
+
+        heights = []
+        for length in ("thigh", "knee", "calf", "ankle", "floor"):
+            placement, _, _ = self.node._bottom_placement(
+                cutout,
+                {"garment_type": "pants", "fit": "regular", "length": length, "silhouette": "straight"},
+                768,
+                1024,
+            )
+            heights.append(placement[3])
+        self.assertEqual(heights, sorted(heights))
+
+    def test_glasses_shoes_and_bracelet_use_round_two_scale(self):
+        glasses = Image.new("RGBA", (430, 190), (80, 80, 80, 255))
+        glasses_box, _, _ = self.node._box_placement(
+            "glasses", glasses, {"size": "small"}, 768, 1024
+        )
+        self.assertGreaterEqual(glasses_box[2], round(768 * 0.135))
+        self.assertLessEqual(axis_change(glasses, glasses_box), 1.02)
+
+        shoes = Image.new("RGBA", (300, 350), (80, 80, 80, 255))
+        shoes_box, _, _ = self.node._box_placement(
+            "shoes", shoes, {"size": "large"}, 768, 1024
+        )
+        self.assertGreaterEqual(shoes_box[3], round(1024 * 0.10))
+        self.assertLessEqual(axis_change(shoes, shoes_box), 1.02)
+
+        bracelet = Image.new("RGBA", (360, 180), (80, 80, 80, 255))
+        bracelet_box, _, _ = self.node._box_placement(
+            "bracelet", bracelet, {"size": "medium"}, 768, 1024
+        )
+        bracelet_centre_y = bracelet_box[1] + bracelet_box[3] / 2
+        self.assertGreaterEqual(bracelet_centre_y, 1024 * 0.43)
+
+    def test_template_has_explicit_hip_axis(self):
+        self.assertAlmostEqual(TEMPLATE["landmarks"]["hip_y"], 0.49)
 
     def test_connected_blank_image_reports_cutout_failure(self):
         blank = Image.new("RGB", (256, 256), "white")
