@@ -1,0 +1,52 @@
+{
+  "items": {
+    "top": {
+      "item_id": "top10",
+      "slot": "top",
+      "garment_type": "shirt",
+      "sleeve_length": "long",
+      "fit": "loose",
+      "length": "hip",
+      "coverage": "cover_waist"
+    },
+    "bottom": {
+      "item_id": "bottom16",
+      "slot": "bottom",
+      "garment_type": "skirt",
+      "fit": "loose",
+      "waist": "high",
+      "length": "ankle",
+      "silhouette": "voluminous"
+    },
+    "shoes": {
+      "item_id": "shoe18",
+      "slot": "shoes",
+      "pair_mode": "source_pair",
+      "placement": "feet"
+    },
+    "hat": {
+      "item_id": "acc24",
+      "slot": "hat",
+      "size": "medium",
+      "placement": "head"
+    },
+    "bag": {
+      "item_id": "acc3",
+      "slot": "bag",
+      "size": "large",
+      "placement": "right_hand"
+    },
+    "glasses": {
+      "item_id": "acc15",
+      "slot": "glasses",
+      "size": "small",
+      "placement": "eyes"
+    },
+    "necklace": {
+      "item_id": "acc17",
+      "slot": "necklace",
+      "size": "large",
+      "placement": "upper_chest"
+    }
+  }
+}

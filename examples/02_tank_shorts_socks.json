@@ -1,0 +1,54 @@
+{
+  "items": {
+    "top": {
+      "item_id": "top5",
+      "slot": "top",
+      "garment_type": "tank",
+      "sleeve_length": "sleeveless",
+      "fit": "slim",
+      "length": "crop",
+      "coverage": "show_midriff"
+    },
+    "bottom": {
+      "item_id": "bottom5",
+      "slot": "bottom",
+      "garment_type": "shorts",
+      "fit": "loose",
+      "waist": "high",
+      "waist_fit": "fitted",
+      "length": "knee",
+      "silhouette": "wide"
+    },
+    "socks": {
+      "item_id": "shoe0",
+      "slot": "socks",
+      "fit": "slim",
+      "length": "mid_calf",
+      "placement": "lower_leg"
+    },
+    "shoes": {
+      "item_id": "shoe10",
+      "slot": "shoes",
+      "pair_mode": "source_pair",
+      "placement": "feet"
+    },
+    "necklace": {
+      "item_id": "acc16",
+      "slot": "necklace",
+      "size": "small",
+      "placement": "neck"
+    },
+    "earrings": {
+      "item_id": "acc23",
+      "slot": "earrings",
+      "size": "large",
+      "placement": "ears"
+    },
+    "bracelet": {
+      "item_id": "acc22",
+      "slot": "bracelet",
+      "size": "medium",
+      "placement": "wrist_side"
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "items": {
+    "top": {
+      "item_id": "top4",
+      "slot": "top",
+      "garment_type": "tank",
+      "sleeve_length": "cap",
+      "fit": "regular",
+      "length": "waist",
+      "coverage": "cover_waist"
+    },
+    "bottom": {
+      "item_id": "bottom11",
+      "slot": "bottom",
+      "garment_type": "skirt",
+      "fit": "regular",
+      "waist": "mid",
+      "length": "thigh",
+      "silhouette": "pleated"
+    },
+    "shoes": {
+      "item_id": "shoe18",
+      "slot": "shoes",
+      "pair_mode": "source_pair",
+      "placement": "feet"
+    },
+    "bag": {
+      "item_id": "acc1",
+      "slot": "bag",
+      "size": "medium",
+      "placement": "right_hand"
+    },
+    "glasses": {
+      "item_id": "acc13",
+      "slot": "glasses",
+      "size": "small",
+      "placement": "eyes"
+    },
+    "necklace": {
+      "item_id": "acc19",
+      "slot": "necklace",
+      "size": "small",
+      "placement": "neck"
+    }
+  }
+}
