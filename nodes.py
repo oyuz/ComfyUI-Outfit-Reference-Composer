@@ -34,48 +34,68 @@ DRAW_ORDER = (
 
 # All coordinates are normalized to the output canvas. The main outfit is
 # slightly left of centre so the bag and wrist accessory have a dedicated
-# gutter on the right. These are maximum envelopes; top, bottom and socks
-# return metadata-specific hard boxes whose occupied ranges do not overlap.
+# gutter on the right. Main garments are measured first and then packed into
+# the main column without changing their source aspect ratio.
 TEMPLATE = {
     "body_center_x": 0.45,
+    "main_top_y": 0.18,
+    "main_bottom_y": 0.99,
     "hard_boxes": {
-        "top": (0.14, 0.17, 0.73, 0.51),
-        "bottom": (0.20, 0.53, 0.70, 0.88),
-        "socks": (0.28, 0.74, 0.62, 0.885),
-        "shoes": (0.27, 0.90, 0.63, 0.98),
-        "hat": (0.33, 0.015, 0.57, 0.10),
-        "glasses": (0.35, 0.105, 0.55, 0.15),
+        # For the packed main column only the horizontal limits are static;
+        # guide rectangles get their vertical ranges after packing.
+        "top": (0.10, 0.18, 0.74, 0.99),
+        "bottom": (0.18, 0.18, 0.72, 0.99),
+        "socks": (0.27, 0.18, 0.63, 0.99),
+        "shoes": (0.24, 0.87, 0.66, 0.99),
+        "hat": (0.32, 0.005, 0.58, 0.08),
+        "glasses": (0.30, 0.09, 0.60, 0.16),
         # A paired earring image is split and placed on the two sides of the
         # glasses. The three boxes are disjoint.
-        "earrings_left": (0.25, 0.105, 0.34, 0.165),
-        "earrings_right": (0.56, 0.105, 0.65, 0.165),
-        "necklace": (0.34, 0.19, 0.56, 0.31),
-        "bracelet": (0.77, 0.31, 0.94, 0.43),
-        "bag": (0.75, 0.47, 0.96, 0.75),
+        "earrings_left": (0.20, 0.09, 0.29, 0.16),
+        "earrings_right": (0.61, 0.09, 0.70, 0.16),
+        "necklace": (0.33, 0.18, 0.57, 0.31),
+        "bracelet": (0.77, 0.39, 0.95, 0.50),
+        "bag": (0.75, 0.51, 0.97, 0.77),
     },
     "landmarks": {
-        "neck_y": 0.19,
+        # shoulder_y and hip_y are diagnostic body axes. Garments retain
+        # local shoulder/hip anchors, then the no-overlap collage is packed.
+        "neck_y": 0.18,
         "shoulder_y": 0.23,
-        "top_hem_y": {
-            "crop": 0.40,
-            "waist": 0.455,
-            "hip": 0.49,
-            "upper_thigh": 0.505,
+        "hip_y": 0.49,
+        # The top edge of a tight bottom cutout is treated as its waistband.
+        # Each waist level is expressed as a distance above the shared hip
+        # axis so high/mid/low remain meaningful even when no top is present.
+        "waist_offset_from_hip": {
+            "high": 0.11,
+            "mid": 0.09,
+            "low": 0.07,
         },
-        "bottom_waist_y": {"high": 0.53, "mid": 0.55, "low": 0.57},
-        "bottom_hem_y": {
-            "thigh": 0.67,
-            "knee": 0.73,
-            "calf": 0.81,
-            "ankle": 0.86,
-            "floor": 0.88,
+        "top_height": {
+            "crop": 0.22,
+            "waist": 0.275,
+            "hip": 0.325,
+            "upper_thigh": 0.37,
+        },
+        "bottom_height": {
+            "thigh": 0.17,
+            "knee": 0.23,
+            "calf": 0.30,
+            "ankle": 0.36,
+            "floor": 0.39,
         },
         # These are shoulder spans, not full sleeve-to-sleeve widths.
         "shoulder_width": {
             "slim": 0.20,
             "regular": 0.225,
             "loose": 0.255,
-            "oversized": 0.29,
+            "oversized": 0.30,
+        },
+        "hip_width": {
+            "slim": 0.225,
+            "regular": 0.255,
+            "loose": 0.29,
+            "oversized": 0.325,
         },
     },
 }
@@ -315,44 +335,42 @@ class OutfitReferenceComposer:
         )
 
     @staticmethod
-    def _bounded_size(
-        cutout,
-        target_width,
-        target_height,
-        hard_width,
-        hard_height,
-        max_axis_distortion=2.5,
-    ):
-        """Apply semantic width and height independently inside a hard slot.
-
-        Product-shot aspect ratios are not reliable body proportions: a long-
-        sleeve shirt naturally occupies a taller/narrower source box than a
-        short-sleeve crop top. Preserving that source aspect ratio made the
-        shoulder anchor drift. Layout metadata therefore owns both axes; the
-        source image only supplies the pixels inside those anchors.
-        """
-        width = max(1.0, min(float(target_width), float(hard_width)))
-        height = max(1.0, min(float(target_height), float(hard_height)))
-        source_aspect = cutout.width / max(1.0, float(cutout.height))
-        target_aspect = width / height
-        axis_distortion = max(target_aspect / source_aspect, source_aspect / target_aspect)
-        if axis_distortion > max_axis_distortion:
-            raise ValueError(
-                f"anchor normalization would require {axis_distortion:.2f}x axis distortion "
-                f"(limit {max_axis_distortion:.2f}x); check the cutout/metadata or raise "
-                "max_axis_distortion for this item"
-            )
-        return int(round(width)), int(round(height))
+    def _uniform_size(cutout, scale, max_width, max_height):
+        """Return a bounded size produced by one scale on both axes."""
+        scale = min(
+            max(float(scale), 1.0 / max(cutout.width, cutout.height)),
+            float(max_width) / max(1, cutout.width),
+            float(max_height) / max(1, cutout.height),
+        )
+        return (
+            max(1, int(round(cutout.width * scale))),
+            max(1, int(round(cutout.height * scale))),
+        )
 
     @staticmethod
-    def _max_axis_distortion(layout):
-        try:
-            value = float(layout.get("max_axis_distortion", 2.5))
-        except (TypeError, ValueError) as error:
-            raise ValueError("max_axis_distortion must be a number from 1.0 to 4.0") from error
-        if not 1.0 <= value <= 4.0:
-            raise ValueError("max_axis_distortion must be a number from 1.0 to 4.0")
-        return value
+    def _weighted_scale(width_scale, height_scale, width_weight=0.65):
+        """Blend two semantic scale targets while keeping a single scale."""
+        width_scale = max(float(width_scale), 1e-6)
+        height_scale = max(float(height_scale), 1e-6)
+        height_weight = 1.0 - width_weight
+        return float(
+            np.exp(width_weight * np.log(width_scale) + height_weight * np.log(height_scale))
+        )
+
+    @staticmethod
+    def _band_span(cutout, start_ratio, end_ratio, percentile=75):
+        """Measure a stable foreground width inside a vertical alpha band."""
+        alpha = np.asarray(cutout.getchannel("A")) >= 8
+        start = max(0, min(cutout.height - 1, int(round(cutout.height * start_ratio))))
+        end = max(start + 1, min(cutout.height, int(round(cutout.height * end_ratio))))
+        spans = []
+        for row in alpha[start:end]:
+            columns = np.flatnonzero(row)
+            if columns.size:
+                spans.append(int(columns[-1] - columns[0] + 1))
+        if not spans:
+            return max(1, cutout.width)
+        return max(1, int(round(np.percentile(spans, percentile))))
 
     def _top_placement(self, cutout, layout, width, height):
         landmarks = TEMPLATE["landmarks"]
@@ -363,7 +381,7 @@ class OutfitReferenceComposer:
             set(landmarks["shoulder_width"]),
             {"oversize": "oversized"},
         )
-        length = self._choice(layout, "length", "waist", set(landmarks["top_hem_y"]))
+        length = self._choice(layout, "length", "waist", set(landmarks["top_height"]))
         coverage = self._choice(
             layout,
             "coverage",
@@ -376,10 +394,7 @@ class OutfitReferenceComposer:
             length = "waist"
         elif coverage == "cover_hip" and length in {"crop", "waist"}:
             length = "hip"
-        hem_y = landmarks["top_hem_y"].get(length, landmarks["top_hem_y"]["waist"])
-        hard_normal = list(TEMPLATE["hard_boxes"]["top"])
-        hard_normal[3] = min(hard_normal[3], hem_y)
-        hard = self._normal_box_to_pixels(tuple(hard_normal), width, height)
+        hard = self._normal_box_to_pixels(TEMPLATE["hard_boxes"]["top"], width, height)
         hard_width, hard_height = hard[2] - hard[0], hard[3] - hard[1]
 
         garment_type = self._choice(
@@ -407,19 +422,22 @@ class OutfitReferenceComposer:
         target_shoulder = landmarks["shoulder_width"].get(
             fit, landmarks["shoulder_width"]["regular"]
         ) * width
-        target_width = target_shoulder / shoulder_ratio
-        desired_height = max(1.0, (hem_y - landmarks["neck_y"]) * height)
-        target_width, target_height = self._bounded_size(
+        source_shoulder = max(1.0, cutout.width * shoulder_ratio)
+        width_scale = target_shoulder / source_shoulder
+        desired_height = landmarks["top_height"].get(
+            length, landmarks["top_height"]["waist"]
+        ) * height
+        height_scale = desired_height / max(1.0, cutout.height)
+        semantic_scale = self._weighted_scale(width_scale, height_scale, 0.65)
+        target_width, target_height = self._uniform_size(
             cutout,
-            target_width,
-            desired_height,
+            semantic_scale,
             hard_width,
-            hard_height,
-            self._max_axis_distortion(layout),
+            min(hard_height, int(round(height * 0.40))),
         )
         centre_x = TEMPLATE["body_center_x"] * width
         x = int(round(centre_x - target_width / 2))
-        y = int(round(hem_y * height - target_height))
+        y = int(round(TEMPLATE["main_top_y"] * height))
         x = min(max(x, hard[0]), hard[2] - target_width)
         y = min(max(y, hard[1]), hard[3] - target_height)
         label = f"top {fit}/{length}"
@@ -434,13 +452,15 @@ class OutfitReferenceComposer:
             {"slim", "regular", "loose", "oversized"},
             {"oversize": "oversized"},
         )
-        self._choice(layout, "garment_type", "", {"", "shorts", "pants", "skirt"})
-        waist = self._choice(layout, "waist", "mid", set(landmarks["bottom_waist_y"]))
+        garment_type = self._choice(
+            layout, "garment_type", "", {"", "shorts", "pants", "skirt"}
+        )
+        waist = self._choice(layout, "waist", "mid", {"high", "mid", "low"})
         length = self._choice(
             layout,
             "length",
             "floor",
-            set(landmarks["bottom_hem_y"]),
+            set(landmarks["bottom_height"]),
             {"full": "floor"},
         )
         silhouette_values = {
@@ -465,45 +485,54 @@ class OutfitReferenceComposer:
                 "a-line": "a_line",
             },
         )
-        waist_y = landmarks["bottom_waist_y"].get(waist, landmarks["bottom_waist_y"]["mid"])
-        hem_y = landmarks["bottom_hem_y"].get(length, landmarks["bottom_hem_y"]["floor"])
-        hard_normal = list(TEMPLATE["hard_boxes"]["bottom"])
-        hard_normal[3] = min(hard_normal[3], hem_y)
-        hard = self._normal_box_to_pixels(tuple(hard_normal), width, height)
+        hard = self._normal_box_to_pixels(TEMPLATE["hard_boxes"]["bottom"], width, height)
         hard_width, hard_height = hard[2] - hard[0], hard[3] - hard[1]
-        desired_height = max(1.0, (hem_y - waist_y) * height)
-
-        fit_width = {"slim": 0.27, "regular": 0.31, "loose": 0.36, "oversized": 0.41}.get(
-            fit, 0.31
-        )
         silhouette_multiplier = {
-            "slim": 0.88,
-            "straight": 0.92,
-            "wide": 1.00,
+            "slim": 0.94,
+            "straight": 1.00,
+            "wide": 1.04,
             "baggy": 1.08,
-            "flare": 1.03,
-            "skirt": 0.94,
-            "pleated": 0.98,
-            "a_line": 1.00,
+            "flare": 1.04,
+            "skirt": 1.00,
+            "pleated": 1.03,
+            "a_line": 1.06,
             "voluminous": 1.08,
         }.get(silhouette, 1.0)
-        desired_width = fit_width * silhouette_multiplier * width
-        # Product-shot aspect ratios are not body measurements. Waist/hem own
-        # the vertical axis, while fit/silhouette own the horizontal axis.
-        # This gives two products with the same metadata the same body scale.
-        target_height = max(1, min(int(round(desired_height)), hard_height))
-        target_width = max(1, min(int(round(desired_width)), hard_width))
-        self._bounded_size(
+
+        if "source_hip_width_ratio" in layout:
+            try:
+                hip_ratio = float(layout["source_hip_width_ratio"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("source_hip_width_ratio must be a number from 0.10 to 1.0") from error
+            if not 0.10 <= hip_ratio <= 1.0:
+                raise ValueError("source_hip_width_ratio must be a number from 0.10 to 1.0")
+            source_hip_span = cutout.width * hip_ratio
+        else:
+            band = (0.12, 0.34) if garment_type == "skirt" else (0.15, 0.36)
+            source_hip_span = self._band_span(cutout, *band)
+
+        target_hip = (
+            landmarks["hip_width"].get(fit, landmarks["hip_width"]["regular"])
+            * silhouette_multiplier
+            * width
+        )
+        width_scale = target_hip / max(1.0, source_hip_span)
+        desired_height = landmarks["bottom_height"].get(
+            length, landmarks["bottom_height"]["floor"]
+        ) * height
+        height_scale = desired_height / max(1.0, cutout.height)
+        semantic_scale = self._weighted_scale(width_scale, height_scale, 0.65)
+        target_width, target_height = self._uniform_size(
             cutout,
-            target_width,
-            target_height,
+            semantic_scale,
             hard_width,
-            hard_height,
-            self._max_axis_distortion(layout),
+            min(hard_height, int(round(height * 0.42))),
         )
         centre_x = TEMPLATE["body_center_x"] * width
         x = int(round(centre_x - target_width / 2))
-        y = int(round(waist_y * height))
+        hip_y = landmarks["hip_y"] * height
+        waist_offset = landmarks["waist_offset_from_hip"][waist] * height
+        y = int(round(hip_y - waist_offset))
         x = min(max(x, hard[0]), hard[2] - target_width)
         y = min(max(y, hard[1]), hard[3] - target_height)
         label = f"bottom {waist}/{length}/{silhouette}"
@@ -514,7 +543,7 @@ class OutfitReferenceComposer:
             bottom_layout,
             "length",
             "" if not bottom_present else "floor",
-            {"", *TEMPLATE["landmarks"]["bottom_hem_y"]},
+            {"", *TEMPLATE["landmarks"]["bottom_height"]},
             {"full": "floor"},
         )
         if bottom_present and not bottom_length:
@@ -524,30 +553,30 @@ class OutfitReferenceComposer:
                 "socks cannot share the leg region with a calf/ankle/floor bottom; "
                 "set the connected bottom length to thigh/knee or omit socks"
             )
-        hard_normal = list(TEMPLATE["hard_boxes"]["socks"])
         sock_length = self._choice(
             layout,
             "length",
             "mid_calf",
             {"ankle", "crew", "mid_calf", "knee", "knee_high"},
         )
-        start_y = {
-            "knee": 0.735,
-            "knee_high": 0.735,
-            "mid_calf": 0.765,
-            "crew": 0.80,
-            "ankle": 0.835,
-        }.get(sock_length, 0.765)
-        if bottom_length in TEMPLATE["landmarks"]["bottom_hem_y"]:
-            start_y = max(start_y, TEMPLATE["landmarks"]["bottom_hem_y"][bottom_length] + 0.018)
-        hard_normal[1] = min(start_y, hard_normal[3] - 0.035)
-        hard = self._normal_box_to_pixels(tuple(hard_normal), width, height)
+        hard = self._normal_box_to_pixels(TEMPLATE["hard_boxes"]["socks"], width, height)
         box_width, box_height = hard[2] - hard[0], hard[3] - hard[1]
-        scale = min(box_width / cutout.width, box_height / cutout.height)
-        target_width = max(1, int(round(cutout.width * scale)))
-        target_height = max(1, int(round(cutout.height * scale)))
+        desired_height = {
+            "knee": 0.145,
+            "knee_high": 0.145,
+            "mid_calf": 0.12,
+            "crew": 0.095,
+            "ankle": 0.07,
+        }.get(sock_length, 0.12) * height
+        target_width, target_height = self._uniform_size(
+            cutout,
+            desired_height / max(1.0, cutout.height),
+            box_width,
+            min(box_height, int(round(height * 0.15))),
+        )
         x = hard[0] + (box_width - target_width) // 2
-        y = hard[3] - target_height
+        y = int(round(0.72 * height))
+        y = min(max(y, hard[1]), hard[3] - target_height)
         return (x, y, target_width, target_height), hard, f"socks {sock_length}"
 
     def _box_placement(self, slot, cutout, layout, width, height):
@@ -555,7 +584,20 @@ class OutfitReferenceComposer:
         box_width, box_height = hard[2] - hard[0], hard[3] - hard[1]
         default_size = "large" if slot == "shoes" else "medium"
         size = self._choice(layout, "size", default_size, {"tiny", "small", "medium", "large"})
-        size_multiplier = {"tiny": 0.58, "small": 0.72, "medium": 0.86, "large": 1.0}.get(size, 0.86)
+        if slot == "glasses":
+            size_multiplier = {
+                "tiny": 0.76,
+                "small": 0.90,
+                "medium": 0.96,
+                "large": 1.0,
+            }.get(size, 0.96)
+        else:
+            size_multiplier = {
+                "tiny": 0.58,
+                "small": 0.72,
+                "medium": 0.86,
+                "large": 1.0,
+            }.get(size, 0.86)
         scale = min(box_width * size_multiplier / cutout.width, box_height * size_multiplier / cutout.height)
         target_width = max(1, int(round(cutout.width * scale)))
         target_height = max(1, int(round(cutout.height * scale)))
@@ -566,6 +608,124 @@ class OutfitReferenceComposer:
         elif slot in {"bag", "shoes"}:
             y = hard[3] - target_height
         return (x, y, target_width, target_height), hard, f"{slot} {size}"
+
+    def _main_gap(self, previous, current, layouts, height):
+        """Return a semantic but compact gap between two main-column slots."""
+        if previous == "top" and current == "bottom":
+            top = layouts.get("top", {})
+            bottom = layouts.get("bottom", {})
+            coverage = str(top.get("coverage", "")).strip().lower()
+            top_length = str(top.get("length", "waist")).strip().lower()
+            if coverage == "show_midriff" or top_length == "crop":
+                waist = str(bottom.get("waist", "mid")).strip().lower()
+                fraction = {"high": 0.028, "mid": 0.036, "low": 0.045}.get(waist, 0.036)
+            else:
+                fraction = 0.012
+        elif previous == "bottom" and current == "socks":
+            fraction = 0.010
+        elif previous == "socks" and current == "shoes":
+            fraction = 0.008
+        elif previous == "bottom" and current == "shoes":
+            length = str(layouts.get("bottom", {}).get("length", "floor")).strip().lower()
+            fraction = {
+                "thigh": 0.070,
+                "knee": 0.055,
+                "calf": 0.032,
+                "ankle": 0.012,
+                "floor": 0.010,
+                "full": 0.010,
+            }.get(length, 0.020)
+        else:
+            fraction = 0.012
+        return max(8, int(round(height * fraction)))
+
+    def _pack_main(self, placements, layouts, width, height):
+        """Resolve semantic main-slot anchors without distorting any item.
+
+        A connected clothing chain is kept compact, while a missing middle
+        category creates a real body-region break. For example, top + shoes
+        leaves the shoes at the foot anchor instead of pulling them below the
+        top. If a connected chain is too tall, every present main item receives
+        the same additional scale.
+        """
+        sequence = [slot for slot in ("top", "bottom", "socks", "shoes") if slot in placements]
+        if not sequence:
+            return placements
+        main_bottom = int(round(TEMPLATE["main_bottom_y"] * height))
+
+        def place_at(global_scale):
+            packed = dict(placements)
+            gaps_before = {}
+            for slot in sequence:
+                placement, hard, label = placements[slot]
+                target_width = max(1, int(round(placement[2] * global_scale)))
+                target_height = max(1, int(round(placement[3] * global_scale)))
+                x0, _, x1, _ = hard
+                centre_x = TEMPLATE["body_center_x"] * width
+                x = int(round(centre_x - target_width / 2))
+                x = min(max(x, x0), x1 - target_width)
+
+                desired_y = placement[1]
+                previous = None
+                if slot == "bottom" and "top" in packed and "top" in placements:
+                    previous = "top"
+                elif slot == "socks" and "bottom" in packed and "bottom" in placements:
+                    previous = "bottom"
+                elif slot == "shoes":
+                    if "socks" in packed and "socks" in placements:
+                        previous = "socks"
+                    elif "bottom" in packed and "bottom" in placements:
+                        previous = "bottom"
+                    else:
+                        # Isolated shoes stay bottom-aligned in the fixed foot
+                        # region even if some unrelated main item was scaled.
+                        desired_y = hard[3] - target_height
+
+                if previous is None:
+                    y = desired_y
+                    gap_before = 0
+                else:
+                    previous_box = packed[previous][0]
+                    gap_before = self._main_gap(previous, slot, layouts, height)
+                    compact_y = previous_box[1] + previous_box[3] + gap_before
+                    # The waistband is a real hip-relative anchor. Socks and
+                    # shoes use their predecessor as the stronger anchor once
+                    # the corresponding garment chain exists.
+                    y = max(desired_y, compact_y) if slot == "bottom" else compact_y
+
+                actual = (x, int(round(y)), target_width, target_height)
+                gaps_before[slot] = gap_before
+                packed[slot] = (actual, hard, label)
+
+            max_end = max(packed[slot][0][1] + packed[slot][0][3] for slot in sequence)
+            return packed, gaps_before, max_end
+
+        global_scale = 1.0
+        packed, gaps_before, max_end = place_at(global_scale)
+        if max_end > main_bottom:
+            low, high = 0.0, 1.0
+            for _ in range(28):
+                middle = (low + high) / 2
+                candidate, candidate_gaps, candidate_end = place_at(middle)
+                if candidate_end <= main_bottom:
+                    low = middle
+                    packed, gaps_before, max_end = candidate, candidate_gaps, candidate_end
+                else:
+                    high = middle
+
+        main_top = int(round(TEMPLATE["main_top_y"] * height))
+        for slot in sequence:
+            actual, hard, label = packed[slot]
+            x0, _, x1, _ = hard
+            pad = min(3, max(0, gaps_before[slot] // 2))
+            dynamic_hard = (
+                x0,
+                max(main_top, actual[1] - pad),
+                x1,
+                min(main_bottom, actual[1] + actual[3] + 3),
+            )
+            packed[slot] = (actual, dynamic_hard, label)
+        return packed
 
     @staticmethod
     def _split_pair(cutout):
@@ -626,6 +786,14 @@ class OutfitReferenceComposer:
     @staticmethod
     def _composite(canvas, cutout, placement):
         x, y, target_width, target_height = placement
+        if min(cutout.width, cutout.height, target_width, target_height) >= 8:
+            source_aspect = cutout.width / cutout.height
+            target_aspect = target_width / target_height
+            axis_change = max(source_aspect / target_aspect, target_aspect / source_aspect)
+            if axis_change > 1.04:
+                raise ValueError(
+                    f"non-uniform resize is forbidden (axis ratio changed {axis_change:.3f}x)"
+                )
         resized = cutout.resize((target_width, target_height), Image.Resampling.LANCZOS)
         shadow = Image.new("RGBA", resized.size, (0, 0, 0, 0))
         shadow_alpha = resized.getchannel("A").filter(ImageFilter.GaussianBlur(2)).point(lambda value: value // 9)
@@ -659,9 +827,7 @@ class OutfitReferenceComposer:
         horizontal = {
             "neck": landmarks["neck_y"],
             "shoulder": landmarks["shoulder_y"],
-            "high waist": landmarks["bottom_waist_y"]["high"],
-            "knee": landmarks["bottom_hem_y"]["knee"],
-            "ankle": landmarks["bottom_hem_y"]["ankle"],
+            "hip axis": landmarks["hip_y"],
         }
         x0 = int(width * 0.12)
         x1 = int(width * 0.72)
@@ -699,7 +865,8 @@ class OutfitReferenceComposer:
                     f"{layout.get('item_id', slot)} is under items.{slot} but declares slot={declared_slot!r}"
                 )
 
-        for slot in DRAW_ORDER:
+        cutouts = {}
+        for slot in SLOTS:
             tensor = images.get(slot)
             if tensor is None:
                 continue
@@ -710,13 +877,17 @@ class OutfitReferenceComposer:
                     f"{slot} image has no detectable foreground; check the image/background "
                     "or set background_threshold in that item's JSON"
                 )
+            cutouts[slot] = cutout
 
+        placements = {}
+        for slot, cutout in cutouts.items():
+            layout = layouts[slot]
             if slot == "top":
-                placement, hard, label = self._top_placement(cutout, layout, width, height)
+                placements[slot] = self._top_placement(cutout, layout, width, height)
             elif slot == "bottom":
-                placement, hard, label = self._bottom_placement(cutout, layout, width, height)
+                placements[slot] = self._bottom_placement(cutout, layout, width, height)
             elif slot == "socks":
-                placement, hard, label = self._socks_placement(
+                placements[slot] = self._socks_placement(
                     cutout,
                     layout,
                     layouts.get("bottom", {}),
@@ -725,14 +896,25 @@ class OutfitReferenceComposer:
                     images.get("bottom") is not None,
                 )
             elif slot == "earrings":
+                continue
+            else:
+                placements[slot] = self._box_placement(slot, cutout, layout, width, height)
+
+        placements = self._pack_main(placements, layouts, width, height)
+
+        for slot in DRAW_ORDER:
+            cutout = cutouts.get(slot)
+            if cutout is None:
+                continue
+            layout = layouts[slot]
+            if slot == "earrings":
                 for part, placement, hard, label in self._earrings_placements(
                     cutout, layout, width, height
                 ):
                     actual = self._composite(canvas, part, placement)
                     records.append((hard, actual, label))
                 continue
-            else:
-                placement, hard, label = self._box_placement(slot, cutout, layout, width, height)
+            placement, hard, label = placements[slot]
             actual = self._composite(canvas, cutout, placement)
             records.append((hard, actual, label))
 
