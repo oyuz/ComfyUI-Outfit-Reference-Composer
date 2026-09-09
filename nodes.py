@@ -46,16 +46,20 @@ TEMPLATE = {
         "top": (0.10, 0.18, 0.74, 0.99),
         "bottom": (0.18, 0.18, 0.72, 0.99),
         "socks": (0.27, 0.18, 0.63, 0.99),
-        "shoes": (0.24, 0.87, 0.66, 0.99),
-        "hat": (0.32, 0.005, 0.58, 0.08),
-        "glasses": (0.30, 0.09, 0.60, 0.16),
+        # The target character is deliberately stylised (roughly five heads
+        # tall), so headwear and footwear need more visual weight than they
+        # would in a realistic adult template.
+        "shoes": (0.22, 0.855, 0.68, 0.99),
+        "hat": (0.29, 0.005, 0.61, 0.10),
+        "glasses": (0.30, 0.105, 0.60, 0.17),
         # A paired earring image is split and placed on the two sides of the
         # glasses. The three boxes are disjoint.
-        "earrings_left": (0.20, 0.09, 0.29, 0.16),
-        "earrings_right": (0.61, 0.09, 0.70, 0.16),
+        "earrings_left": (0.20, 0.105, 0.29, 0.17),
+        "earrings_right": (0.61, 0.105, 0.70, 0.17),
         "necklace": (0.33, 0.18, 0.57, 0.31),
-        "bracelet": (0.77, 0.39, 0.95, 0.50),
-        "bag": (0.75, 0.51, 0.97, 0.77),
+        "bracelet_left": (0.025, 0.50, 0.225, 0.61),
+        "bracelet_right": (0.775, 0.50, 0.975, 0.61),
+        "bag": (0.755, 0.50, 0.985, 0.75),
     },
     "landmarks": {
         # shoulder_y and hip_y are diagnostic body axes. Garments retain
@@ -63,6 +67,8 @@ TEMPLATE = {
         "neck_y": 0.18,
         "shoulder_y": 0.23,
         "hip_y": 0.49,
+        "bag_handle_y": 0.52,
+        "wrist_y": 0.555,
         # The top edge of a tight bottom cutout is treated as its waistband.
         # Each waist level is expressed as a distance above the shared hip
         # axis so high/mid/low remain meaningful even when no top is present.
@@ -580,7 +586,26 @@ class OutfitReferenceComposer:
         return (x, y, target_width, target_height), hard, f"socks {sock_length}"
 
     def _box_placement(self, slot, cutout, layout, width, height):
-        hard = self._normal_box_to_pixels(TEMPLATE["hard_boxes"][slot], width, height)
+        box_name = slot
+        side = None
+        if slot == "bracelet":
+            raw_side = str(layout.get("side", layout.get("placement", "left"))).strip().lower()
+            side_aliases = {
+                "wrist_side": "left",
+                "left_wrist": "left",
+                "left_wrist_side": "left",
+                "right_wrist": "right",
+                "right_wrist_side": "right",
+            }
+            side = side_aliases.get(raw_side, raw_side)
+            if side not in {"left", "right"}:
+                item_id = layout.get("item_id", "bracelet")
+                raise ValueError(
+                    f"{item_id}.side/placement must be left or right wrist; got {raw_side!r}"
+                )
+            box_name = f"bracelet_{side}"
+
+        hard = self._normal_box_to_pixels(TEMPLATE["hard_boxes"][box_name], width, height)
         box_width, box_height = hard[2] - hard[0], hard[3] - hard[1]
         default_size = "large" if slot == "shoes" else "medium"
         size = self._choice(layout, "size", default_size, {"tiny", "small", "medium", "large"})
@@ -591,6 +616,38 @@ class OutfitReferenceComposer:
                 "medium": 0.96,
                 "large": 1.0,
             }.get(size, 0.96)
+        elif slot == "hat":
+            size_multiplier = {
+                "tiny": 0.76,
+                "small": 0.86,
+                "medium": 0.95,
+                "large": 1.0,
+            }.get(size, 0.95)
+        elif slot == "bracelet":
+            # Bracelet and bead-strand product shots often occupy very
+            # different fractions of their source canvas. Normalise them by
+            # visible ring height, with only a restrained semantic size range.
+            desired_height = {
+                "tiny": 0.043,
+                "small": 0.047,
+                "medium": 0.052,
+                "large": 0.057,
+            }.get(size, 0.052) * height
+            target_width, target_height = self._uniform_size(
+                cutout,
+                desired_height / max(1.0, cutout.height),
+                box_width,
+                box_height,
+            )
+            x = hard[0] + (box_width - target_width) // 2
+            wrist_y = int(round(TEMPLATE["landmarks"]["wrist_y"] * height))
+            y = wrist_y - target_height // 2
+            y = min(max(y, hard[1]), hard[3] - target_height)
+            return (
+                (x, y, target_width, target_height),
+                hard,
+                f"bracelet {side}/{size}",
+            )
         else:
             size_multiplier = {
                 "tiny": 0.58,
@@ -605,7 +662,13 @@ class OutfitReferenceComposer:
         y = hard[1] + (box_height - target_height) // 2
         if slot in {"hat", "necklace"}:
             y = hard[1]
-        elif slot in {"bag", "shoes"}:
+        elif slot == "bag":
+            # Product shots include the handle. Its top edge is the useful
+            # hand-held anchor; bottom-aligning made small bags float near the
+            # knee rather than hang from the hand.
+            y = int(round(TEMPLATE["landmarks"]["bag_handle_y"] * height))
+            y = min(max(y, hard[1]), hard[3] - target_height)
+        elif slot == "shoes":
             y = hard[3] - target_height
         return (x, y, target_width, target_height), hard, f"{slot} {size}"
 
@@ -664,6 +727,15 @@ class OutfitReferenceComposer:
                 centre_x = TEMPLATE["body_center_x"] * width
                 x = int(round(centre_x - target_width / 2))
                 x = min(max(x, x0), x1 - target_width)
+                if (
+                    slot == "shoes"
+                    and "bottom" not in placements
+                    and "socks" not in placements
+                    and global_scale == 1.0
+                ):
+                    # Preserve the exact fixed foot anchor (including integer
+                    # rounding) when there is no connected lower-body chain.
+                    x = placement[0]
 
                 desired_y = placement[1]
                 previous = None
