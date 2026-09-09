@@ -31,6 +31,8 @@ class OutfitReferenceComposerTests(unittest.TestCase):
 
     def test_node_has_socks_input_and_one_output(self):
         self.assertIn("socks", SLOTS)
+        optional = list(self.node.INPUT_TYPES()["optional"])
+        self.assertLess(optional.index("socks"), optional.index("shoes"))
         self.assertEqual(self.node.RETURN_TYPES, ("IMAGE",))
         self.assertEqual(self.node.RETURN_NAMES, ("outfit_reference",))
 
@@ -409,7 +411,7 @@ class OutfitReferenceComposerTests(unittest.TestCase):
             heights.append(placement[3])
         self.assertEqual(heights, sorted(heights))
 
-    def test_glasses_shoes_and_bracelet_use_round_two_scale(self):
+    def test_accessories_use_stylised_character_scale(self):
         glasses = Image.new("RGBA", (430, 190), (80, 80, 80, 255))
         glasses_box, _, _ = self.node._box_placement(
             "glasses", glasses, {"size": "small"}, 768, 1024
@@ -417,19 +419,63 @@ class OutfitReferenceComposerTests(unittest.TestCase):
         self.assertGreaterEqual(glasses_box[2], round(768 * 0.135))
         self.assertLessEqual(axis_change(glasses, glasses_box), 1.02)
 
+        hat = Image.new("RGBA", (300, 190), (80, 80, 80, 255))
+        hat_box, _, _ = self.node._box_placement(
+            "hat", hat, {"size": "medium"}, 768, 1024
+        )
+        self.assertGreaterEqual(hat_box[3], round(1024 * 0.085))
+        self.assertLessEqual(axis_change(hat, hat_box), 1.02)
+
         shoes = Image.new("RGBA", (300, 350), (80, 80, 80, 255))
         shoes_box, _, _ = self.node._box_placement(
             "shoes", shoes, {"size": "large"}, 768, 1024
         )
-        self.assertGreaterEqual(shoes_box[3], round(1024 * 0.10))
+        self.assertGreaterEqual(shoes_box[3], round(1024 * 0.13))
         self.assertLessEqual(axis_change(shoes, shoes_box), 1.02)
 
-        bracelet = Image.new("RGBA", (360, 180), (80, 80, 80, 255))
-        bracelet_box, _, _ = self.node._box_placement(
-            "bracelet", bracelet, {"size": "medium"}, 768, 1024
+    def test_bracelet_defaults_left_and_normalises_visible_height(self):
+        bead_strand = Image.new("RGBA", (260, 170), (80, 80, 80, 255))
+        metal_bangles = Image.new("RGBA", (400, 150), (80, 80, 80, 255))
+        bead_box, _, bead_label = self.node._box_placement(
+            "bracelet", bead_strand, {"size": "medium"}, 768, 1024
         )
-        bracelet_centre_y = bracelet_box[1] + bracelet_box[3] / 2
-        self.assertGreaterEqual(bracelet_centre_y, 1024 * 0.43)
+        metal_box, _, metal_label = self.node._box_placement(
+            "bracelet", metal_bangles, {"size": "medium"}, 768, 1024
+        )
+        self.assertIn("left", bead_label)
+        self.assertIn("left", metal_label)
+        self.assertLess(bead_box[0] + bead_box[2], round(768 * 0.23) + 1)
+        self.assertLess(metal_box[0] + metal_box[2], round(768 * 0.23) + 1)
+        self.assertLessEqual(abs(bead_box[3] - metal_box[3]), 3)
+        for box in (bead_box, metal_box):
+            centre_y = box[1] + box[3] / 2
+            self.assertAlmostEqual(centre_y, 1024 * 0.555, delta=1.5)
+            self.assertLessEqual(axis_change(bead_strand if box == bead_box else metal_bangles, box), 1.02)
+
+    def test_bracelet_can_be_explicitly_placed_on_right(self):
+        bracelet = Image.new("RGBA", (280, 150), (80, 80, 80, 255))
+        placement, _, label = self.node._box_placement(
+            "bracelet",
+            bracelet,
+            {"size": "medium", "placement": "right_wrist"},
+            768,
+            1024,
+        )
+        self.assertGreaterEqual(placement[0], round(768 * 0.775))
+        self.assertIn("right", label)
+
+    def test_bag_uses_handle_top_as_hand_anchor(self):
+        small_bag = Image.new("RGBA", (240, 300), (80, 80, 80, 255))
+        large_bag = Image.new("RGBA", (300, 360), (80, 80, 80, 255))
+        small_box, _, _ = self.node._box_placement(
+            "bag", small_bag, {"size": "small"}, 768, 1024
+        )
+        large_box, _, _ = self.node._box_placement(
+            "bag", large_bag, {"size": "large"}, 768, 1024
+        )
+        expected_y = round(TEMPLATE["landmarks"]["bag_handle_y"] * 1024)
+        self.assertEqual(small_box[1], expected_y)
+        self.assertEqual(large_box[1], expected_y)
 
     def test_template_has_explicit_hip_axis(self):
         self.assertAlmostEqual(TEMPLATE["landmarks"]["hip_y"], 0.49)
