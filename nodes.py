@@ -32,6 +32,37 @@ DRAW_ORDER = (
     "necklace",
 )
 
+# V2 deliberately uses the input socket name as its only semantic signal.
+# Every box is permanent and disjoint: an empty slot stays empty and never
+# causes another product to move.  Coordinates are normalized to the output
+# canvas so the same template works at every supported resolution.
+V2_FIXED_SLOTS = {
+    "hat": (0.34, 0.010, 0.58, 0.095),
+    "glasses": (0.34, 0.103, 0.58, 0.158),
+    "earrings_left": (0.23, 0.103, 0.32, 0.158),
+    "earrings_right": (0.60, 0.103, 0.69, 0.158),
+    "necklace": (0.36, 0.166, 0.56, 0.218),
+    "top": (0.13, 0.225, 0.73, 0.475),
+    "bottom": (0.18, 0.485, 0.68, 0.805),
+    "bracelet": (0.01, 0.525, 0.17, 0.645),
+    "bag": (0.73, 0.505, 0.99, 0.755),
+    "socks": (0.28, 0.815, 0.62, 0.895),
+    "shoes": (0.22, 0.905, 0.68, 0.995),
+}
+
+V2_DRAW_ORDER = (
+    "top",
+    "bottom",
+    "socks",
+    "shoes",
+    "hat",
+    "earrings",
+    "glasses",
+    "necklace",
+    "bag",
+    "bracelet",
+)
+
 # All coordinates are normalized to the output canvas. The main outfit is
 # slightly left of centre so the bag and wrist accessory have a dedicated
 # gutter on the right. Main garments are measured first and then packed into
@@ -995,5 +1026,162 @@ class OutfitReferenceComposer:
         return (output,)
 
 
-NODE_CLASS_MAPPINGS = {"OutfitReferenceComposer": OutfitReferenceComposer}
-NODE_DISPLAY_NAME_MAPPINGS = {"OutfitReferenceComposer": "Outfit Reference Composer"}
+class OutfitReferenceComposerV2(OutfitReferenceComposer):
+    """Maximise tight product cutouts inside permanent, metadata-free slots."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {
+            "width": ("INT", {"default": 1536, "min": 256, "max": 2048, "step": 64}),
+            "height": ("INT", {"default": 2048, "min": 256, "max": 2048, "step": 64}),
+            "background": (["off_white", "white", "light_gray"], {"default": "off_white"}),
+            "background_threshold": (
+                "INT",
+                {"default": 24, "min": 4, "max": 100, "step": 1},
+            ),
+            "slot_padding": (
+                "INT",
+                {"default": 10, "min": 0, "max": 64, "step": 1},
+            ),
+            "show_layout_guides": ("BOOLEAN", {"default": False}),
+        }
+        return {"required": required, "optional": {slot: ("IMAGE",) for slot in SLOTS}}
+
+    FUNCTION = "compose_fixed"
+    CATEGORY = "Outfit Reference"
+
+    @classmethod
+    def _fixed_box(cls, box_name, width, height):
+        return cls._normal_box_to_pixels(V2_FIXED_SLOTS[box_name], width, height)
+
+    @classmethod
+    def _fit_fixed_slot(cls, cutout, box_name, width, height, slot_padding):
+        """Contain a tight cutout at the largest uniform scale inside its box."""
+        hard = cls._fixed_box(box_name, width, height)
+        box_width = max(1, hard[2] - hard[0])
+        box_height = max(1, hard[3] - hard[1])
+        requested_padding = max(0, int(slot_padding))
+        padding = min(requested_padding, max(0, (min(box_width, box_height) - 1) // 2))
+        inner_x0 = hard[0] + padding
+        inner_y0 = hard[1] + padding
+        inner_width = max(1, box_width - padding * 2)
+        inner_height = max(1, box_height - padding * 2)
+        scale = min(
+            inner_width / max(1, cutout.width),
+            inner_height / max(1, cutout.height),
+        )
+        target_width = max(1, int(round(cutout.width * scale)))
+        target_height = max(1, int(round(cutout.height * scale)))
+        target_width = min(target_width, inner_width)
+        target_height = min(target_height, inner_height)
+        x = inner_x0 + (inner_width - target_width) // 2
+        y = inner_y0 + (inner_height - target_height) // 2
+        return (x, y, target_width, target_height), hard
+
+    @staticmethod
+    def _composite_flat(canvas, cutout, placement):
+        """Alpha composite without V1's synthetic product shadow."""
+        x, y, target_width, target_height = placement
+        if min(cutout.width, cutout.height, target_width, target_height) >= 8:
+            source_aspect = cutout.width / cutout.height
+            target_aspect = target_width / target_height
+            axis_change = max(source_aspect / target_aspect, target_aspect / source_aspect)
+            if axis_change > 1.04:
+                raise ValueError(
+                    f"non-uniform resize is forbidden (axis ratio changed {axis_change:.3f}x)"
+                )
+        resized = cutout.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        canvas.alpha_composite(resized, (x, y))
+        return (x, y, x + target_width, y + target_height)
+
+    def _fixed_earrings(self, cutout, width, height, slot_padding):
+        parts = self._split_pair(cutout)
+        box_names = (
+            ("earrings_left", "earrings_right")
+            if len(parts) == 2
+            else ("earrings_right",)
+        )
+        results = []
+        for part, box_name in zip(parts, box_names):
+            placement, hard = self._fit_fixed_slot(
+                part, box_name, width, height, slot_padding
+            )
+            label = "earrings L" if box_name.endswith("left") else "earrings R"
+            results.append((part, placement, hard, label))
+        return results
+
+    def _draw_fixed_guides(self, canvas, records, width):
+        draw = ImageDraw.Draw(canvas)
+        line_width = max(1, width // 512)
+        red = (255, 54, 54, 255)
+        cyan = (0, 155, 210, 255)
+        for hard, actual, label in records:
+            draw.rectangle(hard, outline=red, width=line_width)
+            draw.rectangle(actual, outline=cyan, width=line_width)
+            draw.text((hard[0] + 4, hard[1] + 4), label, fill=red)
+
+    def compose_fixed(
+        self,
+        width,
+        height,
+        background,
+        background_threshold,
+        slot_padding,
+        show_layout_guides=False,
+        **images,
+    ):
+        colors = {
+            "white": (255, 255, 255),
+            "off_white": (248, 248, 245),
+            "light_gray": (238, 238, 238),
+        }
+        canvas = Image.new("RGBA", (width, height), colors[background] + (255,))
+        records = []
+        cutouts = {}
+        cutout_layout = {"background_threshold": background_threshold}
+
+        for slot in SLOTS:
+            tensor = images.get(slot)
+            if tensor is None:
+                continue
+            cutout = self._cutout(self._image(tensor), slot, cutout_layout)
+            if cutout is None:
+                raise ValueError(
+                    f"{slot} image has no detectable foreground; check the image/background "
+                    "or adjust background_threshold"
+                )
+            cutouts[slot] = cutout
+
+        for slot in V2_DRAW_ORDER:
+            cutout = cutouts.get(slot)
+            if cutout is None:
+                continue
+            if slot == "earrings":
+                for part, placement, hard, label in self._fixed_earrings(
+                    cutout, width, height, slot_padding
+                ):
+                    actual = self._composite_flat(canvas, part, placement)
+                    records.append((hard, actual, label))
+                continue
+            placement, hard = self._fit_fixed_slot(
+                cutout, slot, width, height, slot_padding
+            )
+            actual = self._composite_flat(canvas, cutout, placement)
+            records.append((hard, actual, slot))
+
+        if show_layout_guides:
+            self._draw_fixed_guides(canvas, records, width)
+        output = torch.from_numpy(
+            np.asarray(canvas.convert("RGB")).astype(np.float32) / 255.0
+        ).unsqueeze(0)
+        return (output,)
+
+
+NODE_CLASS_MAPPINGS = {
+    "OutfitReferenceComposer": OutfitReferenceComposer,
+    "OutfitReferenceComposerV2": OutfitReferenceComposerV2,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "OutfitReferenceComposer": "Outfit Reference Composer",
+    "OutfitReferenceComposerV2": "Outfit Reference Composer V2 (Fixed Slots)",
+}

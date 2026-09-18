@@ -4,7 +4,9 @@
 
 节点把完整、正面的服饰单品图排列到一套普通成人的“无人物坐标系”中，输出一张无人穿搭参考图，供 Flux 等生图模型与全身正面模特图共同使用。
 
-## 主要特性
+仓库同时提供 V1 语义锚点版和 V2 固定分区版。两个节点彼此独立，可以安装在同一个 ComfyUI 中。
+
+## V1（语义锚点版）主要特性
 
 - 一个节点接收上装、下装、袜子、鞋、帽子、包、眼镜、项链、耳环和手镯。
 - 上装使用颈口、肩宽与下摆语义；下装使用腰线、版型与下摆语义。
@@ -17,6 +19,20 @@
 - `show_layout_guides` 可以显示安全区、真实输出框和关键锚点；正式出图时关闭即可。
 - 自动过滤白色背景中的离散水印和噪点，避免它们撑大前景范围。
 
+## V2（Fixed Slots，无 JSON）
+
+节点名称为 `Outfit Reference Composer V2 (Fixed Slots)`。
+
+- 保留 `top`、`bottom`、`socks`、`shoes`、`hat`、`bag`、`glasses`、`necklace`、`earrings` 和 `bracelet` 十个图片输入。
+- 输入端口名是唯一类别信息，不接收也不解析 `outfit_spec`。
+- 每个类别使用永久固定且互不重叠的分区；未连接的类别保持空白，不会引起其他单品移动。
+- 单品先去除白底或读取透明通道，再裁掉源图留白，以 `contain` 方式等比最大化放进对应分区。
+- 不根据高腰／低腰、宽松／修身、长裤／短裤等描述改变比例，也不添加合成阴影。
+- `background_threshold` 统一控制白底识别阈值，`slot_padding` 控制每个固定框的内边距。
+- `show_layout_guides` 开启时，红框表示固定分区，蓝框表示单品实际输出范围。
+
+若业务需要 Basic 默认服饰，应由上游把相应 Basic 图片接入缺少的 `top`、`bottom` 或 `shoes` 端口；V2 不负责按 `item_id` 选择图片。
+
 ## 安装
 
 将本仓库目录放到 `ComfyUI/custom_nodes/`，然后重启 ComfyUI。
@@ -26,6 +42,16 @@
 升级旧版本后如果节点上仍看不到 `socks` 输入，请先重启 ComfyUI、强制刷新浏览器页面，再删除旧的节点实例并重新添加。ComfyUI 工作流会保存旧节点的输入结构，仅刷新已有实例不一定更新接口。
 
 ## 在 ComfyUI 中测试
+
+### V2 Fixed Slots
+
+1. 添加 `Outfit Reference Composer V2 (Fixed Slots)`。
+2. 为所选单品创建 `Load Image`，接到节点同名输入。
+3. 不需要 JSON；建议先使用默认 `1536 × 2048`、`background_threshold = 24` 和 `slot_padding = 10`。
+4. 初次测试开启 `show_layout_guides`；确认后关闭。
+5. 将唯一输出 `outfit_reference` 接到 Flux 的图片参考输入。
+
+### V1 语义锚点版
 
 1. 为所选单品分别创建 `Load Image`。
 2. 把图片接到节点同名输入，例如 `top`、`bottom`、`socks`、`shoes`。
