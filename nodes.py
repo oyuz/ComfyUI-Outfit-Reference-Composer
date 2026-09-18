@@ -33,21 +33,21 @@ DRAW_ORDER = (
 )
 
 # V2 deliberately uses the input socket name as its only semantic signal.
-# Every box is permanent and disjoint: an empty slot stays empty and never
-# causes another product to move.  Coordinates are normalized to the output
-# canvas so the same template works at every supported resolution.
+# Every box is permanent: empty slots stay empty and never move other products.
+# Neck accessories overlap the upper top box and are rendered last. All other slots
+# are disjoint. Coordinates are normalized for every supported resolution.
 V2_FIXED_SLOTS = {
-    "hat": (0.34, 0.010, 0.58, 0.095),
-    "glasses": (0.34, 0.103, 0.58, 0.158),
+    "hat": (0.31, 0.005, 0.61, 0.101),
+    "glasses": (0.32, 0.102, 0.60, 0.168),
     "earrings_left": (0.23, 0.103, 0.32, 0.158),
     "earrings_right": (0.60, 0.103, 0.69, 0.158),
-    "necklace": (0.36, 0.166, 0.56, 0.218),
-    "top": (0.13, 0.225, 0.73, 0.475),
-    "bottom": (0.18, 0.485, 0.68, 0.805),
+    "necklace": (0.35, 0.170, 0.57, 0.260),
+    "top": (0.13, 0.175, 0.73, 0.475),
+    "bottom": (0.18, 0.480, 0.70, 0.815),
     "bracelet": (0.01, 0.525, 0.17, 0.645),
     "bag": (0.73, 0.505, 0.99, 0.755),
-    "socks": (0.28, 0.815, 0.62, 0.895),
-    "shoes": (0.22, 0.905, 0.68, 0.995),
+    "socks": (0.13, 0.820, 0.29, 0.995),
+    "shoes": (0.31, 0.820, 0.70, 0.995),
 }
 
 V2_DRAW_ORDER = (
