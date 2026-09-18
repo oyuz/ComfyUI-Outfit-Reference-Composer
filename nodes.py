@@ -702,108 +702,6 @@ class OutfitReferenceComposer:
             fraction = 0.012
         return max(8, int(round(height * fraction)))
 
-    def _shoe_hidden_fraction(self, bottom_layout, shoe_layout):
-        """Return how much of a shoe is intentionally hidden under long pants.
-
-        Explicit floor-length trousers cover footwear by default. A legacy
-        shoe_coverage=none value remains available for the rare exception.
-        """
-        coverage = self._choice(
-            bottom_layout,
-            "shoe_coverage",
-            "",
-            {"", "none", "cover_most"},
-            {"most": "cover_most"},
-        )
-        if coverage == "none":
-            return 0.0
-
-        garment_type = self._choice(
-            bottom_layout, "garment_type", "", {"", "pants", "shorts", "skirt"}
-        )
-        if garment_type in {"shorts", "skirt"}:
-            return 0.0
-        # Older JSON can omit garment_type. Do not mistake an explicitly
-        # skirt-like silhouette for trousers in that compatibility path.
-        if not garment_type and str(bottom_layout.get("silhouette", "")).strip().lower() in {
-            "skirt", "a_line", "a-line", "pleated"
-        }:
-            return 0.0
-        length = self._choice(
-            bottom_layout,
-            "length",
-            "",
-            {"", *TEMPLATE["landmarks"]["bottom_height"]},
-            {"full": "floor"},
-        )
-        if length != "floor":
-            return 0.0
-
-        footwear_type = self._choice(
-            shoe_layout,
-            "footwear_type",
-            str(shoe_layout.get("shoe_type", "")),
-            {"", "shoes", "boots"},
-            {
-                "shoe": "shoes", "sneakers": "shoes", "loafers": "shoes",
-                "boot": "boots", "ankle_boots": "boots", "mid_calf_boots": "boots",
-                "knee_high_boots": "boots",
-            },
-        )
-        if not footwear_type:
-            shoe_description = shoe_layout.get(
-                "wearing_description_zh", shoe_layout.get("wearing_description", "")
-            )
-            if not isinstance(shoe_description, str):
-                raise ValueError("shoes.wearing_description_zh must be a string")
-            footwear_type = "boots" if "靴" in shoe_description else "shoes"
-        return 0.75 if footwear_type == "boots" else 0.50
-
-    @staticmethod
-    def _solid_row(cutout, first=False, start=0, ignore_light_shadow=False):
-        """Find a garment edge while ignoring stray background-shadow pixels."""
-        alpha = np.asarray(cutout.getchannel("A"))
-        solid = alpha >= 160
-        if ignore_light_shadow:
-            # White-background product shots can leave an opaque pale ground
-            # shadow below a dark hem. Derive a permissive garment brightness
-            # from its body and exclude that shadow from the edge anchor.
-            luminance = np.asarray(cutout.convert("RGB"), dtype=np.float32).mean(axis=2)
-            body_start = int(round(cutout.height * 0.60))
-            body_end = max(body_start + 1, int(round(cutout.height * 0.80)))
-            body = luminance[body_start:body_end][solid[body_start:body_end]]
-            if body.size:
-                threshold = min(235.0, float(np.median(body)) + 70.0)
-                solid &= luminance <= threshold
-        occupied = np.count_nonzero(solid, axis=1)
-        minimum = max(2, int(round(cutout.width * 0.02)))
-        rows = np.flatnonzero(occupied[start:] >= minimum)
-        if not rows.size:
-            return None
-        return start + int(rows[0] if first else rows[-1])
-
-    def _align_covered_shoes(self, placements, cutouts, hidden_fraction):
-        """Align visible shoe pixels to the pant hem, not cutout whitespace."""
-        bottom_placement = placements["bottom"][0]
-        shoe_placement, shoe_hard, shoe_label = placements["shoes"]
-        bottom_cutout = cutouts["bottom"]
-        shoe_cutout = cutouts["shoes"]
-        hem_row = self._solid_row(bottom_cutout, ignore_light_shadow=True)
-        hidden_row = int(round(shoe_cutout.height * hidden_fraction))
-        shoe_row = self._solid_row(shoe_cutout, first=True, start=hidden_row)
-        if hem_row is None or shoe_row is None:
-            return
-        hem_y = bottom_placement[1] + round((hem_row + 1) * bottom_placement[3] / bottom_cutout.height)
-        shoe_visible_y = shoe_placement[1] + round(shoe_row * shoe_placement[3] / shoe_cutout.height)
-        shift = max(0, shoe_visible_y - hem_y + 1)
-        shift = min(shift, round(shoe_placement[3] * 0.30))
-        if shift:
-            x, y, target_width, target_height = shoe_placement
-            shoe_placement = (x, y - shift, target_width, target_height)
-            x0, y0, x1, y1 = shoe_hard
-            shoe_hard = (x0, y0 - shift, x1, y1 - shift)
-            placements["shoes"] = (shoe_placement, shoe_hard, shoe_label)
-
     def _pack_main(self, placements, layouts, width, height):
         """Resolve semantic main-slot anchors without distorting any item.
 
@@ -817,11 +715,6 @@ class OutfitReferenceComposer:
         if not sequence:
             return placements
         main_bottom = int(round(TEMPLATE["main_bottom_y"] * height))
-        shoe_hidden_fraction = (
-            self._shoe_hidden_fraction(layouts.get("bottom", {}), layouts.get("shoes", {}))
-            if "bottom" in placements and "shoes" in placements else 0.0
-        )
-
         def place_at(global_scale):
             packed = dict(placements)
             gaps_before = {}
@@ -864,12 +757,7 @@ class OutfitReferenceComposer:
                     gap_before = 0
                 else:
                     previous_box = packed[previous][0]
-                    if previous == "bottom" and slot == "shoes" and shoe_hidden_fraction:
-                        # The hidden shaft/upper sits behind the pant hem;
-                        # only the lower visible part extends below it.
-                        gap_before = -int(round(target_height * shoe_hidden_fraction))
-                    else:
-                        gap_before = self._main_gap(previous, slot, layouts, height)
+                    gap_before = self._main_gap(previous, slot, layouts, height)
                     compact_y = previous_box[1] + previous_box[3] + gap_before
                     # The waistband is a real hip-relative anchor. Socks and
                     # shoes use their predecessor as the stronger anchor once
@@ -967,7 +855,7 @@ class OutfitReferenceComposer:
         return results
 
     @staticmethod
-    def _composite(canvas, cutout, placement, hide_top_fraction=0.0, trim_bottom_fraction=0.0):
+    def _composite(canvas, cutout, placement):
         x, y, target_width, target_height = placement
         if min(cutout.width, cutout.height, target_width, target_height) >= 8:
             source_aspect = cutout.width / cutout.height
@@ -978,19 +866,12 @@ class OutfitReferenceComposer:
                     f"non-uniform resize is forbidden (axis ratio changed {axis_change:.3f}x)"
                 )
         resized = cutout.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        if trim_bottom_fraction:
-            trimmed = min(target_height - 1, int(round(target_height * trim_bottom_fraction)))
-            resized = resized.crop((0, 0, target_width, target_height - trimmed))
-        if hide_top_fraction:
-            hidden = min(target_height - 1, int(round(target_height * hide_top_fraction)))
-            resized = resized.crop((0, hidden, target_width, resized.height))
-            y += hidden
         shadow = Image.new("RGBA", resized.size, (0, 0, 0, 0))
         shadow_alpha = resized.getchannel("A").filter(ImageFilter.GaussianBlur(2)).point(lambda value: value // 9)
         shadow.putalpha(shadow_alpha)
         canvas.alpha_composite(shadow, (x + 2, y + 3))
         canvas.alpha_composite(resized, (x, y))
-        return (x, y, x + target_width, y + resized.height)
+        return (x, y, x + target_width, y + target_height)
 
     @staticmethod
     def _dashed_line(draw, xy, fill, width=1, dash=7, gap=5):
@@ -1092,28 +973,7 @@ class OutfitReferenceComposer:
 
         placements = self._pack_main(placements, layouts, width, height)
 
-        shoe_hidden_fraction = (
-            self._shoe_hidden_fraction(layouts.get("bottom", {}), layouts.get("shoes", {}))
-            if "bottom" in cutouts and "shoes" in cutouts else 0.0
-        )
-        bottom_trim_fraction = 0.0
-        if shoe_hidden_fraction:
-            hem_row = self._solid_row(cutouts["bottom"], ignore_light_shadow=True)
-            if hem_row is not None:
-                candidate = (cutouts["bottom"].height - hem_row - 1) / cutouts["bottom"].height
-                # Only remove a narrow studio-ground-shadow tail, never a
-                # meaningful section of the garment itself.
-                if candidate <= 0.05:
-                    bottom_trim_fraction = candidate
-            self._align_covered_shoes(placements, cutouts, shoe_hidden_fraction)
-        # Usually footwear is completely visible. Only an explicitly
-        # floor-length trouser may be drawn over the hidden upper.
-        draw_order = (
-            ("shoes",) + tuple(slot for slot in DRAW_ORDER if slot != "shoes")
-            if shoe_hidden_fraction else DRAW_ORDER
-        )
-
-        for slot in draw_order:
+        for slot in DRAW_ORDER:
             cutout = cutouts.get(slot)
             if cutout is None:
                 continue
@@ -1126,13 +986,7 @@ class OutfitReferenceComposer:
                     records.append((hard, actual, label))
                 continue
             placement, hard, label = placements[slot]
-            actual = self._composite(
-                canvas,
-                cutout,
-                placement,
-                hide_top_fraction=shoe_hidden_fraction if slot == "shoes" else 0.0,
-                trim_bottom_fraction=bottom_trim_fraction if slot == "bottom" else 0.0,
-            )
+            actual = self._composite(canvas, cutout, placement)
             records.append((hard, actual, label))
 
         if show_layout_guides:
