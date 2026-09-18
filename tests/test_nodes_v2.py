@@ -47,10 +47,10 @@ class OutfitReferenceComposerV2Tests(unittest.TestCase):
         self.assertEqual(list(inputs["optional"]), list(SLOTS))
         self.assertLess(list(inputs["optional"]).index("socks"), list(inputs["optional"]).index("shoes"))
 
-    def test_fixed_boxes_are_pairwise_disjoint(self):
+    def test_fixed_boxes_only_allow_necklace_to_overlap_top(self):
         for left, right in combinations(V2_FIXED_SLOTS, 2):
             with self.subTest(left=left, right=right):
-                self.assertFalse(overlaps(V2_FIXED_SLOTS[left], V2_FIXED_SLOTS[right]))
+                self.assertEqual(overlaps(V2_FIXED_SLOTS[left], V2_FIXED_SLOTS[right]), frozenset((left, right)) == frozenset(("top", "necklace")))
 
     def test_cutout_is_maximised_without_distortion(self):
         for size in ((640, 420), (260, 700), (1000, 100)):
