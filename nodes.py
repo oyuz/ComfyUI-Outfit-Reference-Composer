@@ -36,18 +36,20 @@ DRAW_ORDER = (
 # Every box is permanent: empty slots stay empty and never move other products.
 # Neck accessories overlap the upper top box and are rendered last. All other slots
 # are disjoint. Coordinates are normalized for every supported resolution.
+V2_OUTFIT_CENTER_X = 0.46
+
 V2_FIXED_SLOTS = {
     "hat": (0.31, 0.005, 0.61, 0.101),
     "glasses": (0.32, 0.102, 0.60, 0.168),
     "earrings_left": (0.23, 0.103, 0.32, 0.158),
     "earrings_right": (0.60, 0.103, 0.69, 0.158),
     "necklace": (0.35, 0.170, 0.57, 0.260),
-    "top": (0.13, 0.175, 0.73, 0.475),
-    "bottom": (0.18, 0.480, 0.70, 0.815),
+    "top": (0.16, 0.175, 0.76, 0.475),
+    "bottom": (0.20, 0.480, 0.72, 0.815),
     "bracelet": (0.01, 0.525, 0.17, 0.645),
     "bag": (0.73, 0.505, 0.99, 0.755),
-    "socks": (0.13, 0.820, 0.29, 0.995),
-    "shoes": (0.31, 0.820, 0.70, 0.995),
+    "socks": (0.09, 0.820, 0.25, 0.995),
+    "shoes": (0.265, 0.820, 0.655, 0.995),
 }
 
 V2_DRAW_ORDER = (
@@ -1115,6 +1117,13 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
         line_width = max(1, width // 512)
         red = (255, 54, 54, 255)
         cyan = (0, 155, 210, 255)
+        centre_x = int(round(V2_OUTFIT_CENTER_X * width))
+        self._dashed_line(
+            draw,
+            (centre_x, 0, centre_x, canvas.height - 1),
+            (125, 125, 125, 210),
+            width=1,
+        )
         for hard, actual, label in records:
             draw.rectangle(hard, outline=red, width=line_width)
             draw.rectangle(actual, outline=cyan, width=line_width)
