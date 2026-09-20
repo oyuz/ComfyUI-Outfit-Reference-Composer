@@ -1057,6 +1057,23 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
         return cls._normal_box_to_pixels(V2_FIXED_SLOTS[box_name], width, height)
 
     @classmethod
+    def _bottom_waist_center(cls, cutout):
+        alpha = np.asarray(cutout.getchannel("A")) >= 96
+        minimum_span = max(3, int(round(cutout.width * 0.08)))
+        for low, high in ((0.02, 0.12), (0.12, 0.45)):
+            start = min(cutout.height - 1, max(0, int(round(cutout.height * low))))
+            end = min(cutout.height, max(start + 1, int(round(cutout.height * high))))
+            centers = []
+            for row in alpha[start:end]:
+                columns = np.flatnonzero(row)
+                if columns.size >= minimum_span:
+                    left, right = np.percentile(columns, (5, 95))
+                    centers.append((left + right) / 2)
+            if centers:
+                return float(np.median(centers))
+        return cutout.width / 2
+
+    @classmethod
     def _fit_fixed_slot(cls, cutout, box_name, width, height, slot_padding):
         """Contain a tight cutout at the largest uniform scale inside its box."""
         hard = cls._fixed_box(box_name, width, height)
@@ -1072,11 +1089,24 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
             inner_width / max(1, cutout.width),
             inner_height / max(1, cutout.height),
         )
+        waist_center = None
+        axis_x = (hard[0] + hard[2]) / 2
+        if box_name == "bottom":
+            waist_center = cls._bottom_waist_center(cutout)
+            scale = min(
+                scale,
+                (axis_x - inner_x0) / max(1, waist_center),
+                (inner_x0 + inner_width - axis_x) / max(1, cutout.width - waist_center),
+            )
         target_width = max(1, int(round(cutout.width * scale)))
         target_height = max(1, int(round(cutout.height * scale)))
         target_width = min(target_width, inner_width)
         target_height = min(target_height, inner_height)
-        x = inner_x0 + (inner_width - target_width) // 2
+        if waist_center is None:
+            x = inner_x0 + (inner_width - target_width) // 2
+        else:
+            x = int(round(axis_x - waist_center * target_width / cutout.width))
+            x = min(max(x, inner_x0), inner_x0 + inner_width - target_width)
         y = inner_y0 + (inner_height - target_height) // 2
         return (x, y, target_width, target_height), hard
 
@@ -1112,7 +1142,7 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
             results.append((part, placement, hard, label))
         return results
 
-    def _draw_fixed_guides(self, canvas, records, width):
+    def _draw_fixed_guides(self, canvas, records, width, waist_marker=None):
         draw = ImageDraw.Draw(canvas)
         line_width = max(1, width // 512)
         red = (255, 54, 54, 255)
@@ -1128,6 +1158,13 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
             draw.rectangle(hard, outline=red, width=line_width)
             draw.rectangle(actual, outline=cyan, width=line_width)
             draw.text((hard[0] + 4, hard[1] + 4), label, fill=red)
+        if waist_marker is not None:
+            x, y = waist_marker
+            radius = max(4, width // 256)
+            green = (0, 145, 80, 255)
+            draw.line((x - radius, y, x + radius, y), fill=green, width=2)
+            draw.line((x, y - radius, x, y + radius), fill=green, width=2)
+            draw.text((x + radius + 3, y + 2), "waist anchor", fill=green)
 
     def compose_fixed(
         self,
@@ -1148,6 +1185,7 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
         records = []
         cutouts = {}
         cutout_layout = {"background_threshold": background_threshold}
+        waist_marker = None
 
         for slot in SLOTS:
             tensor = images.get(slot)
@@ -1177,9 +1215,14 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
             )
             actual = self._composite_flat(canvas, cutout, placement)
             records.append((hard, actual, slot))
+            if slot == "bottom":
+                waist_marker = (
+                    int(round(actual[0] + self._bottom_waist_center(cutout) * (actual[2] - actual[0]) / cutout.width)),
+                    int(round(actual[1] + (actual[3] - actual[1]) * 0.07)),
+                )
 
         if show_layout_guides:
-            self._draw_fixed_guides(canvas, records, width)
+            self._draw_fixed_guides(canvas, records, width, waist_marker)
         output = torch.from_numpy(
             np.asarray(canvas.convert("RGB")).astype(np.float32) / 255.0
         ).unsqueeze(0)
