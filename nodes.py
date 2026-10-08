@@ -33,11 +33,11 @@ DRAW_ORDER = (
 )
 
 # V2 deliberately uses the input socket name as its only semantic signal.
-# Every box is permanent: empty slots stay empty and never move other products.
-# Neck accessories overlap the upper top box and are rendered last. All other slots
-# are disjoint. Coordinates are normalized for every supported resolution.
+# Every box is permanent: an empty slot stays empty and never causes another
+# product to move.  Neck accessories deliberately overlap the upper top box
+# and are rendered later; every other pair remains disjoint. Coordinates are
+# normalized so the same template works at every supported resolution.
 V2_OUTFIT_CENTER_X = 0.46
-
 V2_FIXED_SLOTS = {
     "hat": (0.31, 0.005, 0.61, 0.101),
     "glasses": (0.32, 0.102, 0.60, 0.168),
@@ -48,6 +48,9 @@ V2_FIXED_SLOTS = {
     "bottom": (0.20, 0.480, 0.72, 0.815),
     "bracelet": (0.01, 0.525, 0.17, 0.645),
     "bag": (0.73, 0.505, 0.99, 0.755),
+    # Socks share the lower band beside footwear instead of reserving a full
+    # row. This keeps an empty socks input from creating a large vertical gap
+    # and gives tall boots substantially more height without any overlap.
     "socks": (0.09, 0.820, 0.25, 0.995),
     "shoes": (0.265, 0.820, 0.655, 0.995),
 }
@@ -63,6 +66,41 @@ V2_DRAW_ORDER = (
     "necklace",
     "bag",
     "bracelet",
+)
+
+# V3_TOP is a separate node, not a mode switch on V2. It keeps the same
+# cutout/contain rules but dedicates the full portrait canvas to upper-body
+# products only. No lower-body or side-accessory sockets are exposed.
+V3_TOP_SLOTS = (
+    "top",
+    "hat",
+    "glasses",
+    "earrings",
+    "necklace",
+)
+
+V3_TOP_CENTER_X = 0.50
+V3_TOP_FIXED_SLOTS = {
+    # Preserve the visually successful V2 upper-body proportions while
+    # expanding that region to the full V3_TOP canvas. Headwear and neckwear
+    # therefore grow in step with the much larger top instead of appearing
+    # undersized beside it.
+    "hat": (0.18, 0.005, 0.82, 0.225),
+    "glasses": (0.25, 0.230, 0.75, 0.335),
+    "earrings_left": (0.07, 0.230, 0.25, 0.335),
+    "earrings_right": (0.75, 0.230, 0.93, 0.335),
+    # Neckwear keeps Round 13's lower centre point, but is reined in one step
+    # so chains and scarves remain subordinate to the garment neckline.
+    "necklace": (0.28, 0.350, 0.72, 0.550),
+    "top": (0.015, 0.345, 0.985, 0.995),
+}
+
+V3_TOP_DRAW_ORDER = (
+    "top",
+    "hat",
+    "earrings",
+    "glasses",
+    "necklace",
 )
 
 # All coordinates are normalized to the output canvas. The main outfit is
@@ -1058,6 +1096,12 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
 
     @classmethod
     def _bottom_waist_center(cls, cutout):
+        """Find the garment's upper-body axis, ignoring asymmetric lower details.
+
+        A full cutout can include side chains, asymmetric hems or a floor
+        shadow. Those belong in the reference image but must not determine
+        where the waistband sits relative to the outfit's shared axis.
+        """
         alpha = np.asarray(cutout.getchannel("A")) >= 96
         minimum_span = max(3, int(round(cutout.width * 0.08)))
         for low, high in ((0.02, 0.12), (0.12, 0.45)):
@@ -1093,10 +1137,13 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
         axis_x = (hard[0] + hard[2]) / 2
         if box_name == "bottom":
             waist_center = cls._bottom_waist_center(cutout)
+            # Keep the entire source in the safe box even when its waistband
+            # is far from the cutout's geometric middle.
             scale = min(
                 scale,
                 (axis_x - inner_x0) / max(1, waist_center),
-                (inner_x0 + inner_width - axis_x) / max(1, cutout.width - waist_center),
+                (inner_x0 + inner_width - axis_x)
+                / max(1, cutout.width - waist_center),
             )
         target_width = max(1, int(round(cutout.width * scale)))
         target_height = max(1, int(round(cutout.height * scale)))
@@ -1229,11 +1276,129 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
         return (output,)
 
 
+class OutfitReferenceComposerV3Top(OutfitReferenceComposerV2):
+    """Compose only upper-body products in a full-canvas fixed layout."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {
+            "width": ("INT", {"default": 1536, "min": 256, "max": 2048, "step": 64}),
+            "height": ("INT", {"default": 2048, "min": 256, "max": 2048, "step": 64}),
+            "background": (["off_white", "white", "light_gray"], {"default": "off_white"}),
+            "background_threshold": (
+                "INT",
+                {"default": 24, "min": 4, "max": 100, "step": 1},
+            ),
+            "slot_padding": (
+                "INT",
+                {"default": 10, "min": 0, "max": 64, "step": 1},
+            ),
+            "show_layout_guides": ("BOOLEAN", {"default": False}),
+        }
+        return {
+            "required": required,
+            "optional": {slot: ("IMAGE",) for slot in V3_TOP_SLOTS},
+        }
+
+    FUNCTION = "compose_top"
+    CATEGORY = "Outfit Reference"
+
+    @classmethod
+    def _fixed_box(cls, box_name, width, height):
+        return cls._normal_box_to_pixels(V3_TOP_FIXED_SLOTS[box_name], width, height)
+
+    def _draw_top_guides(self, canvas, records, width):
+        draw = ImageDraw.Draw(canvas)
+        line_width = max(1, width // 512)
+        red = (255, 54, 54, 255)
+        cyan = (0, 155, 210, 255)
+        centre_x = int(round(V3_TOP_CENTER_X * width))
+        self._dashed_line(
+            draw,
+            (centre_x, 0, centre_x, canvas.height - 1),
+            (125, 125, 125, 210),
+            width=1,
+        )
+        for hard, actual, label in records:
+            draw.rectangle(hard, outline=red, width=line_width)
+            draw.rectangle(actual, outline=cyan, width=line_width)
+            draw.text((hard[0] + 4, hard[1] + 4), label, fill=red)
+
+    def compose_top(
+        self,
+        width,
+        height,
+        background,
+        background_threshold,
+        slot_padding,
+        show_layout_guides=False,
+        **images,
+    ):
+        unsupported = sorted(
+            slot
+            for slot, tensor in images.items()
+            if slot not in V3_TOP_SLOTS and tensor is not None
+        )
+        if unsupported:
+            raise ValueError(
+                "V3_TOP only accepts top, hat, glasses, earrings and necklace; "
+                f"unsupported inputs: {', '.join(unsupported)}"
+            )
+
+        colors = {
+            "white": (255, 255, 255),
+            "off_white": (248, 248, 245),
+            "light_gray": (238, 238, 238),
+        }
+        canvas = Image.new("RGBA", (width, height), colors[background] + (255,))
+        records = []
+        cutouts = {}
+        cutout_layout = {"background_threshold": background_threshold}
+
+        for slot in V3_TOP_SLOTS:
+            tensor = images.get(slot)
+            if tensor is None:
+                continue
+            cutout = self._cutout(self._image(tensor), slot, cutout_layout)
+            if cutout is None:
+                raise ValueError(
+                    f"{slot} image has no detectable foreground; check the image/background "
+                    "or adjust background_threshold"
+                )
+            cutouts[slot] = cutout
+
+        for slot in V3_TOP_DRAW_ORDER:
+            cutout = cutouts.get(slot)
+            if cutout is None:
+                continue
+            if slot == "earrings":
+                for part, placement, hard, label in self._fixed_earrings(
+                    cutout, width, height, slot_padding
+                ):
+                    actual = self._composite_flat(canvas, part, placement)
+                    records.append((hard, actual, label))
+                continue
+            placement, hard = self._fit_fixed_slot(
+                cutout, slot, width, height, slot_padding
+            )
+            actual = self._composite_flat(canvas, cutout, placement)
+            records.append((hard, actual, slot))
+
+        if show_layout_guides:
+            self._draw_top_guides(canvas, records, width)
+        output = torch.from_numpy(
+            np.asarray(canvas.convert("RGB")).astype(np.float32) / 255.0
+        ).unsqueeze(0)
+        return (output,)
+
+
 NODE_CLASS_MAPPINGS = {
     "OutfitReferenceComposer": OutfitReferenceComposer,
     "OutfitReferenceComposerV2": OutfitReferenceComposerV2,
+    "OutfitReferenceComposerV3Top": OutfitReferenceComposerV3Top,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "OutfitReferenceComposer": "Outfit Reference Composer",
     "OutfitReferenceComposerV2": "Outfit Reference Composer V2 (Fixed Slots)",
+    "OutfitReferenceComposerV3Top": "Outfit Reference Composer V3_TOP (Upper Body Only)",
 }
