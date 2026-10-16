@@ -68,6 +68,24 @@ V2_DRAW_ORDER = (
     "bracelet",
 )
 
+# V3 starts from V2's exact tight-cutout placements, then resolves the two
+# semantically ambiguous garment boundaries against the *actual neighbouring
+# item*.  These fractions are object-relative, not canvas hard-box
+# coordinates: a coverwaist top reaches 30% into the placed bottom, and a
+# shoehalf bottom reaches the placed footwear's two-thirds line plus a tiny
+# seam guard.  Only the lower third of the shoe layer is retained so wide
+# shoes cannot leak around narrow trouser legs above the intended toe band.
+V3_COVERWAIST_HIP_FRACTION = 0.30
+V3_SHOE_COVER_FRACTION = 2.0 / 3.0
+# The footwear crop still starts at the exact two-thirds boundary.  Extend the
+# visible trouser hem a few pixels past that line so antialiasing and curved
+# shoe/toe silhouettes cannot expose the canvas between the two layers.
+V3_BOTTOM_SHOE_SEAM_OVERLAP_FRACTION = 0.03
+V3_LAYOUT_TAGS = {
+    "top": "coverwaist",
+    "bottom": "shoehalf",
+}
+
 # V3_TOP is a separate node, not a mode switch on V2. It keeps the same
 # cutout/contain rules but dedicates the full portrait canvas to upper-body
 # products only. No lower-body or side-accessory sockets are exposed.
@@ -1392,13 +1410,333 @@ class OutfitReferenceComposerV3Top(OutfitReferenceComposerV2):
         return (output,)
 
 
+class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
+    """Full-body fixed layout with two description-driven overlap modes.
+
+    V3 does not infer semantics from pixels.  Wardrobe Library supplies the
+    selected items' layout tags as a tiny JSON object, for example
+    ``{"top":"coverwaist","bottom":"shoehalf"}``.  Missing tags (or tags
+    whose counterpart image is absent) fall back to the exact V2 render.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        inputs = super().INPUT_TYPES()
+        optional = dict(inputs["optional"])
+        optional["layout_tags_json"] = (
+            "STRING",
+            {"forceInput": True, "default": "{}", "multiline": False},
+        )
+        return {"required": dict(inputs["required"]), "optional": optional}
+
+    FUNCTION = "compose_v3"
+    CATEGORY = "Outfit Reference"
+
+    @staticmethod
+    def _parse_layout_tags(layout_tags_json):
+        if layout_tags_json is None or not str(layout_tags_json).strip():
+            return {}
+        try:
+            payload = json.loads(str(layout_tags_json))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"layout_tags_json is not valid JSON: {exc.msg}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("layout_tags_json must be a JSON object")
+
+        tags = {}
+        for slot, raw_tag in payload.items():
+            if slot not in V3_LAYOUT_TAGS:
+                raise ValueError(
+                    "layout_tags_json only accepts top and bottom keys; "
+                    f"received {slot!r}"
+                )
+            tag = str(raw_tag or "").strip().lower()
+            if not tag:
+                continue
+            expected = V3_LAYOUT_TAGS[slot]
+            if tag != expected:
+                raise ValueError(
+                    f"layout_tags_json.{slot} must be {expected!r}; received {tag!r}"
+                )
+            tags[slot] = tag
+        return tags
+
+    @staticmethod
+    def _placement_box(placement):
+        x, y, target_width, target_height = placement
+        return (x, y, x + target_width, y + target_height)
+
+    @staticmethod
+    def _union_boxes(first, second):
+        return (
+            min(first[0], second[0]),
+            min(first[1], second[1]),
+            max(first[2], second[2]),
+            max(first[3], second[3]),
+        )
+
+    @staticmethod
+    def _visible_alpha_bbox(cutout, threshold=8):
+        """Return the alpha-visible box using the same cutoff as ``_cutout``."""
+        return cutout.getchannel("A").point(
+            lambda value: 255 if value >= threshold else 0
+        ).getbbox()
+
+    @staticmethod
+    def _scale_to_lower_anchor(cutout, base_placement, target_bottom, axis_x, source_axis_x):
+        """Uniformly scale from a fixed upper edge to an object-relative line."""
+        _base_x, y, _base_width, _base_height = base_placement
+        target_bottom = int(round(target_bottom))
+        target_height = max(1, target_bottom - y)
+        scale = target_height / max(1, cutout.height)
+        target_width = max(1, int(round(cutout.width * scale)))
+        # Use the realised horizontal scale so the selected source axis remains
+        # on the common outfit axis even after integer rounding.
+        x = int(round(axis_x - source_axis_x * target_width / cutout.width))
+        return (x, y, target_width, target_height)
+
+    def _v3_relative_placements(
+        self,
+        cutouts,
+        width,
+        height,
+        slot_padding,
+        coverwaist,
+        shoehalf,
+    ):
+        """Start with V2 placements, then meet the two semantic boundaries.
+
+        The upper edge of each tagged garment remains exactly where V2 put it.
+        Scaling is uniform and anchored to the shared outfit axis.  This makes
+        the result independent of source aspect ratio and avoids claiming an
+        overlap merely because a larger empty hard box was allocated.
+        """
+        placements = {}
+        hard_boxes = {}
+        for slot, cutout in cutouts.items():
+            if slot == "earrings":
+                continue
+            placement, hard = self._fit_fixed_slot(
+                cutout, slot, width, height, slot_padding
+            )
+            placements[slot] = placement
+            hard_boxes[slot] = hard
+
+        axis_x = V2_OUTFIT_CENTER_X * width
+        if shoehalf:
+            shoe_placement = placements["shoes"]
+            shoe_top = shoe_placement[1]
+            shoe_height = shoe_placement[3]
+            target_hem = shoe_top + int(round(shoe_height * V3_SHOE_COVER_FRACTION))
+            seam_overlap = max(
+                1,
+                int(round(shoe_height * V3_BOTTOM_SHOE_SEAM_OVERLAP_FRACTION)),
+            )
+            visible_target_hem = target_hem + seam_overlap
+            bottom_cutout = cutouts["bottom"]
+            # ``_cutout`` deliberately leaves a small transparent safety pad.
+            # Anchor the *visible alpha hem* to the semantic two-thirds line,
+            # rather than anchoring the padded image rectangle there.  This
+            # prevents the canvas from appearing as a white seam while keeping
+            # the shoe crop strictly limited to its lower third.
+            visible_bbox = self._visible_alpha_bbox(bottom_cutout)
+            visible_hem = visible_bbox[3] if visible_bbox else bottom_cutout.height
+            base_y = placements["bottom"][1]
+            padded_target_bottom = base_y + int(
+                np.ceil(
+                    (visible_target_hem - base_y)
+                    * bottom_cutout.height
+                    / max(1, visible_hem)
+                )
+            )
+            placements["bottom"] = self._scale_to_lower_anchor(
+                bottom_cutout,
+                placements["bottom"],
+                padded_target_bottom,
+                axis_x,
+                self._bottom_waist_center(bottom_cutout),
+            )
+            hard_boxes["bottom"] = self._union_boxes(
+                hard_boxes["bottom"],
+                self._placement_box(placements["bottom"]),
+            )
+
+        if coverwaist:
+            bottom_placement = placements["bottom"]
+            hip_y = bottom_placement[1] + int(
+                round(bottom_placement[3] * V3_COVERWAIST_HIP_FRACTION)
+            )
+            top_cutout = cutouts["top"]
+            placements["top"] = self._scale_to_lower_anchor(
+                top_cutout,
+                placements["top"],
+                hip_y,
+                axis_x,
+                top_cutout.width / 2,
+            )
+            hard_boxes["top"] = self._union_boxes(
+                hard_boxes["top"],
+                self._placement_box(placements["top"]),
+            )
+
+        return placements, hard_boxes
+
+    @staticmethod
+    def _shoe_toe_third(cutout, placement):
+        """Return only the lower shoe third at its original placed scale.
+
+        Cropping the source and placement together (rather than hiding it
+        behind a narrow trouser cutout) guarantees no shoe upper can leak at
+        the sides above the semantic two-thirds coverage line.
+        """
+        source_start = int(round(cutout.height * V3_SHOE_COVER_FRACTION))
+        source_start = min(max(0, source_start), cutout.height - 1)
+        x, y, target_width, target_height = placement
+        target_start = int(round(target_height * V3_SHOE_COVER_FRACTION))
+        target_start = min(max(0, target_start), target_height - 1)
+        toe = cutout.crop((0, source_start, cutout.width, cutout.height))
+        toe_placement = (
+            x,
+            y + target_start,
+            target_width,
+            target_height - target_start,
+        )
+        return toe, toe_placement
+
+    @staticmethod
+    def _v3_draw_order(coverwaist, shoehalf):
+        if coverwaist and shoehalf:
+            main = ("socks", "shoes", "bottom", "top")
+        elif coverwaist:
+            main = ("bottom", "top", "socks", "shoes")
+        elif shoehalf:
+            main = ("top", "socks", "shoes", "bottom")
+        else:
+            main = V2_DRAW_ORDER[:4]
+        return main + V2_DRAW_ORDER[4:]
+
+    def compose_v3(
+        self,
+        width,
+        height,
+        background,
+        background_threshold,
+        slot_padding,
+        show_layout_guides=False,
+        layout_tags_json="{}",
+        **images,
+    ):
+        tags = self._parse_layout_tags(layout_tags_json)
+        coverwaist = (
+            tags.get("top") == "coverwaist"
+            and images.get("top") is not None
+            and images.get("bottom") is not None
+        )
+        shoehalf = (
+            tags.get("bottom") == "shoehalf"
+            and images.get("bottom") is not None
+            and images.get("shoes") is not None
+        )
+
+        # This is more than a conceptual fallback: it guarantees V2 and an
+        # untagged V3 remain pixel-identical as V2 evolves.
+        if not coverwaist and not shoehalf:
+            return self.compose_fixed(
+                width,
+                height,
+                background,
+                background_threshold,
+                slot_padding,
+                show_layout_guides,
+                **images,
+            )
+
+        colors = {
+            "white": (255, 255, 255),
+            "off_white": (248, 248, 245),
+            "light_gray": (238, 238, 238),
+        }
+        canvas = Image.new("RGBA", (width, height), colors[background] + (255,))
+        records = []
+        cutouts = {}
+        cutout_layout = {"background_threshold": background_threshold}
+        waist_marker = None
+
+        for slot in SLOTS:
+            tensor = images.get(slot)
+            if tensor is None:
+                continue
+            cutout = self._cutout(self._image(tensor), slot, cutout_layout)
+            if cutout is None:
+                raise ValueError(
+                    f"{slot} image has no detectable foreground; check the image/background "
+                    "or adjust background_threshold"
+                )
+            cutouts[slot] = cutout
+
+        placements, hard_boxes = self._v3_relative_placements(
+            cutouts,
+            width,
+            height,
+            slot_padding,
+            coverwaist,
+            shoehalf,
+        )
+
+        for slot in self._v3_draw_order(coverwaist, shoehalf):
+            cutout = cutouts.get(slot)
+            if cutout is None:
+                continue
+            if slot == "earrings":
+                for part, placement, hard, label in self._fixed_earrings(
+                    cutout, width, height, slot_padding
+                ):
+                    actual = self._composite_flat(canvas, part, placement)
+                    records.append((hard, actual, label))
+                continue
+            placement = placements[slot]
+            hard = hard_boxes[slot]
+            render_cutout = cutout
+            label = slot
+            if slot == "shoes" and shoehalf:
+                render_cutout, placement = self._shoe_toe_third(cutout, placement)
+                label += " / toe 1/3"
+            elif slot == "top" and coverwaist:
+                label += " / coverwaist"
+            elif slot == "bottom" and shoehalf:
+                label += " / shoehalf"
+            actual = self._composite_flat(canvas, render_cutout, placement)
+            records.append((hard, actual, label))
+            if slot == "bottom":
+                waist_marker = (
+                    int(
+                        round(
+                            actual[0]
+                            + self._bottom_waist_center(cutout)
+                            * (actual[2] - actual[0])
+                            / cutout.width
+                        )
+                    ),
+                    int(round(actual[1] + (actual[3] - actual[1]) * 0.07)),
+                )
+
+        if show_layout_guides:
+            self._draw_fixed_guides(canvas, records, width, waist_marker)
+        output = torch.from_numpy(
+            np.asarray(canvas.convert("RGB")).astype(np.float32) / 255.0
+        ).unsqueeze(0)
+        return (output,)
+
+
 NODE_CLASS_MAPPINGS = {
     "OutfitReferenceComposer": OutfitReferenceComposer,
     "OutfitReferenceComposerV2": OutfitReferenceComposerV2,
+    "OutfitReferenceComposerV3": OutfitReferenceComposerV3,
     "OutfitReferenceComposerV3Top": OutfitReferenceComposerV3Top,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "OutfitReferenceComposer": "Outfit Reference Composer",
     "OutfitReferenceComposerV2": "Outfit Reference Composer V2 (Fixed Slots)",
+    "OutfitReferenceComposerV3": "Outfit Reference Composer V3 (Tagged Overlap)",
     "OutfitReferenceComposerV3Top": "Outfit Reference Composer V3_TOP (Upper Body Only)",
 }
