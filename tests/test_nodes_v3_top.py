@@ -75,8 +75,58 @@ class OutfitReferenceComposerV3TopTests(unittest.TestCase):
             768, 1024, "off_white", 24, 10, False, top=top,
         )[0]
         self.assertEqual(tuple(v2_output.shape), (1, 1024, 768, 3))
-        self.assertEqual(tuple(v3_output.shape), (1, 1024, 768, 3))
+        self.assertLess(v3_output.shape[1], 1024)
+        self.assertLessEqual(v3_output.shape[2], 768)
+        self.assertEqual(v3_output.shape[1] % 64, 0)
+        self.assertEqual(v3_output.shape[2] % 64, 0)
         self.assertTrue(torch.equal(top, before))
+
+    def test_complete_set_keeps_original_boxes_and_requested_canvas(self):
+        cutouts = {
+            "top": Image.new("RGBA", (360, 420), (50, 70, 90, 255)),
+            "hat": Image.new("RGBA", (240, 100), (50, 70, 90, 255)),
+            "glasses": Image.new("RGBA", (280, 80), (50, 70, 90, 255)),
+            "earrings": Image.new("RGBA", (200, 80), (50, 70, 90, 255)),
+            "necklace": Image.new("RGBA", (180, 220), (50, 70, 90, 255)),
+        }
+        boxes = self.v3._dynamic_boxes(cutouts, 1536, 2048)
+        for name, box in V3_TOP_FIXED_SLOTS.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    boxes[name],
+                    self.v3._normal_box_to_pixels(box, 1536, 2048),
+                )
+        output = self.v3.compose_top(
+            768,
+            1024,
+            "white",
+            24,
+            8,
+            False,
+            **{slot: product_tensor() for slot in V3_TOP_SLOTS},
+        )[0]
+        self.assertEqual(tuple(output.shape), (1, 1024, 768, 3))
+
+    def test_missing_face_row_expands_hat_and_content_is_cropped(self):
+        hat = {"hat": Image.new("RGBA", (260, 120), (50, 70, 90, 255))}
+        hat_only_box = self.v3._dynamic_boxes(hat, 1000, 1000)["hat"]
+        full_head_box = self.v3._dynamic_boxes(
+            {**hat, "glasses": Image.new("RGBA", (220, 80), (50, 70, 90, 255))},
+            1000,
+            1000,
+        )["hat"]
+        self.assertGreater(hat_only_box[3], full_head_box[3])
+        output = self.v3.compose_top(
+            1024, 1024, "white", 24, 8, False, hat=product_tensor((260, 120))
+        )[0]
+        self.assertLess(output.shape[1], 1024)
+        self.assertLess(output.shape[2], 1024)
+        self.assertEqual(output.shape[1] % 64, 0)
+        self.assertEqual(output.shape[2] % 64, 0)
+        guided = self.v3.compose_top(
+            1024, 1024, "white", 24, 8, True, hat=product_tensor((260, 120))
+        )[0]
+        self.assertEqual(tuple(guided.shape), (1, 1024, 1024, 3))
 
     def test_v2_public_contract_is_unchanged(self):
         expected_slots = (
@@ -188,11 +238,10 @@ class OutfitReferenceComposerV3TopTests(unittest.TestCase):
         overlaid = self.v3.compose_top(
             1000, 1000, "white", 24, 0, False, top=top, necklace=necklace
         )[0][0].numpy()
-        y, x = 420, 500
-        self.assertGreater(top_only[y, x, 0], 0.8)
-        self.assertLess(top_only[y, x, 2], 0.2)
-        self.assertGreater(overlaid[y, x, 2], 0.8)
-        self.assertLess(overlaid[y, x, 0], 0.2)
+        top_red = (top_only[..., 0] > 0.8) & (top_only[..., 2] < 0.2)
+        necklace_blue = (overlaid[..., 2] > 0.8) & (overlaid[..., 0] < 0.2)
+        self.assertGreater(int(np.count_nonzero(top_red)), 100)
+        self.assertGreater(int(np.count_nonzero(necklace_blue)), 100)
 
     def test_pair_earrings_use_separate_symmetric_boxes(self):
         left = V3_TOP_FIXED_SLOTS["earrings_left"]

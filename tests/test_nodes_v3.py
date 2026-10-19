@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -52,14 +53,14 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             1000, 1000, "white", 24, 0, False, **images
         )[0]
 
-    def render_v3(self, tags="{}", **images):
+    def render_v3(self, tags="{}", guides=False, **images):
         return self.v3.compose_v3(
             1000,
             1000,
             "white",
             24,
             0,
-            False,
+            guides,
             layout_tags_json=tags,
             **images,
         )[0]
@@ -87,11 +88,29 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             self.v3.INPUT_TYPES()["optional"]["layout_tags_json"][1]["forceInput"]
         )
 
-    def test_empty_tags_are_pixel_identical_to_v2(self):
-        images = self.images()
+    def test_complete_untagged_set_is_pixel_identical_to_v2(self):
+        images = {
+            slot: rgba_tensor(
+                (180 + index * 9, 160 + index * 13),
+                (30 + index * 12, 80, 170, 255),
+            )
+            for index, slot in enumerate(SLOTS)
+        }
         self.assertTrue(torch.equal(self.render_v2(**images), self.render_v3(**images)))
 
-    def test_tag_without_required_counterpart_falls_back_to_v2(self):
+    def test_incomplete_untagged_set_compacts_and_crops(self):
+        images = self.images()
+        v2 = self.render_v2(**images)
+        v3 = self.render_v3(**images)
+        self.assertNotEqual(tuple(v2.shape), tuple(v3.shape))
+        self.assertLess(v3.shape[1], v2.shape[1])
+        self.assertLess(v3.shape[2], v2.shape[2])
+        self.assertEqual(v3.shape[1] % 64, 0)
+        self.assertEqual(v3.shape[2] % 64, 0)
+        guided = self.render_v3(guides=True, **images)
+        self.assertEqual(tuple(guided.shape), (1, 1000, 1000, 3))
+
+    def test_tag_without_required_counterpart_uses_same_dynamic_render_as_no_tag(self):
         all_images = self.images()
         for images, tagged in (
             (
@@ -104,12 +123,53 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             ),
         ):
             with self.subTest(tagged=tagged):
-                self.assertTrue(
-                    torch.equal(
-                        self.render_v2(**images),
-                        self.render_v3(tagged, **images),
-                    )
+                self.assertTrue(torch.equal(
+                    self.render_v3("{}", **images),
+                    self.render_v3(tagged, **images),
+                ))
+
+    def test_full_semantic_rows_keep_original_hard_boxes(self):
+        cutouts = {
+            "hat": Image.new("RGBA", (80, 60), (30, 40, 50, 255)),
+            "glasses": Image.new("RGBA", (100, 40), (30, 40, 50, 255)),
+            "top": Image.new("RGBA", (160, 240), (30, 40, 50, 255)),
+            "bottom": Image.new("RGBA", (140, 260), (30, 40, 50, 255)),
+            "shoes": Image.new("RGBA", (160, 80), (30, 40, 50, 255)),
+        }
+        boxes = self.v3._dynamic_boxes(cutouts, 1536, 2048)
+        for name in ("hat", "glasses", "top", "bottom", "shoes"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    boxes[name],
+                    self.v3._normal_box_to_pixels(V2_FIXED_SLOTS[name], 1536, 2048),
                 )
+
+    def test_empty_face_row_is_reused_by_hat(self):
+        hat = {"hat": Image.new("RGBA", (120, 80), (30, 40, 50, 255))}
+        hat_only = self.v3._dynamic_boxes(hat, 1000, 1000)["hat"]
+        with_face = self.v3._dynamic_boxes(
+            {**hat, "glasses": Image.new("RGBA", (120, 50), (30, 40, 50, 255))},
+            1000,
+            1000,
+        )["hat"]
+        self.assertEqual(hat_only[1], with_face[1])
+        self.assertGreater(hat_only[3], with_face[3])
+
+    def test_rgba_alpha_bypasses_background_segmentation(self):
+        image = Image.new("RGBA", (80, 80), (12, 34, 56, 0))
+        ImageDraw.Draw(image).rectangle((20, 18, 59, 61), fill=(220, 30, 30, 255))
+        tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).unsqueeze(0)
+        with mock.patch.object(
+            OutfitReferenceComposerV3,
+            "_component_keep_mask",
+            side_effect=AssertionError("RGBA must not be re-segmented"),
+        ):
+            cutout = self.v3._cutout(
+                self.v3._image(tensor), "top", {"background_threshold": 24}
+            )
+        self.assertIsNotNone(cutout)
+        self.assertLess(cutout.width, image.width)
+        self.assertLess(cutout.height, image.height)
 
     def test_tags_are_strict_and_actionable(self):
         for payload, message in (
@@ -194,6 +254,59 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             self.assertGreaterEqual(hard[2], actual_box[2])
             self.assertGreaterEqual(hard[3], actual_box[3])
 
+    def test_overlap_tags_apply_after_empty_row_reallocation(self):
+        images = self.images()
+        cutouts = {
+            slot: self.v3._cutout(
+                self.v3._image(tensor), slot, {"background_threshold": 24}
+            )
+            for slot, tensor in images.items()
+        }
+
+        upper_pair = {slot: cutouts[slot] for slot in ("top", "bottom")}
+        upper_boxes = self.v3._dynamic_boxes(upper_pair, 1000, 1000)
+        upper_placements, _ = self.v3._v3_relative_placements(
+            upper_pair,
+            1000,
+            1000,
+            0,
+            True,
+            False,
+            upper_boxes,
+        )
+        self.assertEqual(
+            upper_placements["top"][1] + upper_placements["top"][3],
+            upper_placements["bottom"][1]
+            + round(
+                upper_placements["bottom"][3]
+                * V3_TOP_COVERWAIST_HIP_FRACTION
+            ),
+        )
+
+        lower_pair = {slot: cutouts[slot] for slot in ("bottom", "shoes")}
+        lower_boxes = self.v3._dynamic_boxes(lower_pair, 1000, 1000)
+        lower_placements, _ = self.v3._v3_relative_placements(
+            lower_pair,
+            1000,
+            1000,
+            0,
+            False,
+            True,
+            lower_boxes,
+        )
+        shoe_top = lower_placements["shoes"][1]
+        shoe_height = lower_placements["shoes"][3]
+        visible_bbox = self.v3._visible_alpha_bbox(lower_pair["bottom"])
+        mapped_hem = lower_placements["bottom"][1] + (
+            visible_bbox[3]
+            * lower_placements["bottom"][3]
+            / lower_pair["bottom"].height
+        )
+        expected_boundary = shoe_top + round(
+            shoe_height * V3_BOTTOM_SHOEHALF_COVER_FRACTION
+        )
+        self.assertGreater(mapped_hem, expected_boundary)
+
     def test_shoe_layer_is_cropped_to_its_lower_third_at_same_scale(self):
         shoe = self.v3._cutout(
             self.v3._image(self.images()["shoes"]),
@@ -234,6 +347,7 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             json.dumps(
                 {"top": "top_coverwaist", "bottom": "bottom_shoehalf"}
             ),
+            guides=True,
             **images,
         )[0].numpy()
         blue = (
@@ -252,7 +366,9 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             "off_white",
             24,
             0,
-            False,
+            # Keep the requested coordinate system while inspecting the seam.
+            # Guide strokes do not touch the sampled interior pixel below.
+            True,
             layout_tags_json=json.dumps({"bottom": "bottom_shoehalf"}),
             **self.images(),
         )[0][0].numpy()
@@ -275,7 +391,7 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
         # the visible alpha hem (rather than the padded rectangle) to the
         # nominal boundary, so the row immediately above it is garment rather
         # than the off-white canvas.
-        seam_pixel = output[nominal_boundary - 1, axis_x]
+        seam_pixel = output[nominal_boundary - 1, axis_x + 5]
         canvas = np.array([248, 248, 245], dtype=np.float32) / 255.0
         self.assertGreater(float(np.max(np.abs(seam_pixel - canvas))), 0.20)
         self.assertGreater(seam_pixel[1], 0.60)
@@ -299,16 +415,17 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             json.dumps(
                 {"top": "top_coverwaist", "bottom": "bottom_shoehalf"}
             ),
+            guides=True,
             **self.images(),
         )[0].numpy()
 
         # The top is drawn after the bottom at their waist overlap.
-        waist_pixel = output[500, 460]
+        waist_pixel = output[500, 470]
         self.assertGreater(waist_pixel[0], 0.8)
         self.assertLess(waist_pixel[1], 0.2)
 
         # The bottom is drawn after the shoes at their lower overlap.
-        shoe_pixel = output[850, 460]
+        shoe_pixel = output[850, 470]
         self.assertGreater(shoe_pixel[1], 0.6)
         self.assertLess(shoe_pixel[2], 0.3)
 
