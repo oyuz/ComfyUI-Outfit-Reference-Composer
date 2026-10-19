@@ -3,7 +3,7 @@ from collections import deque
 
 import numpy as np
 import torch
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 
 SLOTS = (
@@ -120,6 +120,178 @@ V3_TOP_DRAW_ORDER = (
     "glasses",
     "necklace",
 )
+
+# V3/V3_TOP keep the proven full-set coordinates above, but collapse empty
+# semantic rows before fitting individual cutouts.  The row allocator only
+# changes the vertical limits: source aspect ratios, centre axes and draw order
+# remain unchanged.  This makes a missing face row useful to the hat, for
+# example, without moving unrelated side accessories into arbitrary positions.
+V3_ROW_GAP = 0.005
+V3_FULL_HEAD_ROWS = {
+    "hat": (0.005, 0.101),
+    "face": (0.102, 0.168),
+}
+V3_FULL_BODY_ROWS = {
+    "top": (0.175, 0.475),
+    "bottom": (0.480, 0.815),
+    "foot": (0.820, 0.995),
+}
+V3_TOP_ROWS = {
+    "hat": (0.005, 0.225),
+    "face": (0.230, 0.335),
+    "top": (0.345, 0.995),
+}
+
+# Content cropping is deliberately conservative.  Padding is measured against
+# the requested canvas and the final extent is rounded *outwards* to a multiple
+# that is friendly to common diffusion/VAE pipelines.
+V3_CROP_MULTIPLE = 64
+V3_CROP_MIN_PADDING = 16
+V3_CROP_PADDING_FRACTION = 0.015
+
+
+def _allocate_active_rows(rows, active_names, gap=V3_ROW_GAP):
+    """Collapse missing semantic rows while preserving the all-row template."""
+    active = [name for name in rows if name in active_names]
+    if not active:
+        return {}
+    if len(active) == len(rows):
+        return {name: tuple(rows[name]) for name in active}
+
+    span_start = min(bounds[0] for bounds in rows.values())
+    span_end = max(bounds[1] for bounds in rows.values())
+    available = max(0.0, span_end - span_start - gap * (len(active) - 1))
+    original_heights = {
+        name: max(1e-9, rows[name][1] - rows[name][0]) for name in active
+    }
+    total_weight = sum(original_heights.values())
+    allocated = {}
+    cursor = span_start
+    for index, name in enumerate(active):
+        if index == len(active) - 1:
+            end = span_end
+        else:
+            end = cursor + available * original_heights[name] / total_weight
+        allocated[name] = (cursor, end)
+        cursor = end + gap
+    return allocated
+
+
+def _remap_box_y(box, source_row, target_row):
+    """Map a box's vertical offsets from one semantic row into another."""
+    x0, y0, x1, y1 = box
+    source_start, source_end = source_row
+    target_start, target_end = target_row
+    source_height = max(1e-9, source_end - source_start)
+    scale = (target_end - target_start) / source_height
+    return (
+        x0,
+        target_start + (y0 - source_start) * scale,
+        x1,
+        target_start + (y1 - source_start) * scale,
+    )
+
+
+def _fit_cutout_in_box(cutout, hard, slot_padding, horizontal_anchor=None):
+    """Contain a tight cutout uniformly inside an explicit pixel box."""
+    box_width = max(1, hard[2] - hard[0])
+    box_height = max(1, hard[3] - hard[1])
+    requested_padding = max(0, int(slot_padding))
+    padding = min(
+        requested_padding,
+        max(0, (min(box_width, box_height) - 1) // 2),
+    )
+    inner_x0 = hard[0] + padding
+    inner_y0 = hard[1] + padding
+    inner_width = max(1, box_width - padding * 2)
+    inner_height = max(1, box_height - padding * 2)
+    scale = min(
+        inner_width / max(1, cutout.width),
+        inner_height / max(1, cutout.height),
+    )
+    axis_x = (hard[0] + hard[2]) / 2
+    if horizontal_anchor is not None:
+        scale = min(
+            scale,
+            (axis_x - inner_x0) / max(1, horizontal_anchor),
+            (inner_x0 + inner_width - axis_x)
+            / max(1, cutout.width - horizontal_anchor),
+        )
+    target_width = min(
+        max(1, int(round(cutout.width * scale))),
+        inner_width,
+    )
+    target_height = min(
+        max(1, int(round(cutout.height * scale))),
+        inner_height,
+    )
+    if horizontal_anchor is None:
+        x = inner_x0 + (inner_width - target_width) // 2
+    else:
+        x = int(round(axis_x - horizontal_anchor * target_width / cutout.width))
+        x = min(max(x, inner_x0), inner_x0 + inner_width - target_width)
+    y = inner_y0 + (inner_height - target_height) // 2
+    return (x, y, target_width, target_height)
+
+
+def _add_cutout_to_occupancy(occupancy, cutout, placement):
+    """Union a placed cutout's real alpha into a canvas-sized occupancy mask."""
+    x, y, target_width, target_height = placement
+    resized_alpha = cutout.getchannel("A").resize(
+        (target_width, target_height), Image.Resampling.LANCZOS
+    )
+    left = max(0, x)
+    top = max(0, y)
+    right = min(occupancy.width, x + target_width)
+    bottom = min(occupancy.height, y + target_height)
+    if left >= right or top >= bottom:
+        return
+    source = resized_alpha.crop((left - x, top - y, right - x, bottom - y))
+    current = occupancy.crop((left, top, right, bottom))
+    occupancy.paste(ImageChops.lighter(current, source), (left, top))
+
+
+def _content_crop_box(occupancy, slot_padding=0, multiple=V3_CROP_MULTIPLE):
+    """Return a padded, outward-aligned crop around alpha-visible products."""
+    visible = occupancy.point(lambda value: 255 if value >= 8 else 0).getbbox()
+    if not visible:
+        return (0, 0, occupancy.width, occupancy.height)
+    padding = max(
+        V3_CROP_MIN_PADDING,
+        int(slot_padding) * 2,
+        int(round(min(occupancy.size) * V3_CROP_PADDING_FRACTION)),
+    )
+    wanted = (
+        max(0, visible[0] - padding),
+        max(0, visible[1] - padding),
+        min(occupancy.width, visible[2] + padding),
+        min(occupancy.height, visible[3] + padding),
+    )
+
+    def aligned_extent(start, end, limit):
+        wanted_size = max(1, end - start)
+        if wanted_size >= limit:
+            return 0, limit
+        aligned_size = min(
+            limit,
+            int(np.ceil(wanted_size / max(1, multiple))) * max(1, multiple),
+        )
+        centre = (start + end) / 2
+        aligned_start = int(round(centre - aligned_size / 2))
+        aligned_start = min(max(0, aligned_start), limit - aligned_size)
+        return aligned_start, aligned_start + aligned_size
+
+    x0, x1 = aligned_extent(wanted[0], wanted[2], occupancy.width)
+    y0, y1 = aligned_extent(wanted[1], wanted[3], occupancy.height)
+    return (x0, y0, x1, y1)
+
+
+def _canvas_to_rgb_tensor(canvas, occupancy=None, crop=False, slot_padding=0):
+    if crop and occupancy is not None:
+        canvas = canvas.crop(_content_crop_box(occupancy, slot_padding))
+    return torch.from_numpy(
+        np.asarray(canvas.convert("RGB")).astype(np.float32) / 255.0
+    ).unsqueeze(0)
 
 # All coordinates are normalized to the output canvas. The main outfit is
 # slightly left of centre so the bag and wrist accessory have a dedicated
@@ -1295,7 +1467,7 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
 
 
 class OutfitReferenceComposerV3Top(OutfitReferenceComposerV2):
-    """Compose only upper-body products in a full-canvas fixed layout."""
+    """Compose upper-body products with semantic empty-row compaction."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1342,6 +1514,67 @@ class OutfitReferenceComposerV3Top(OutfitReferenceComposerV2):
             draw.rectangle(actual, outline=cyan, width=line_width)
             draw.text((hard[0] + 4, hard[1] + 4), label, fill=red)
 
+    @classmethod
+    def _dynamic_boxes(cls, cutouts, width, height):
+        """Return V3_TOP boxes after collapsing only empty semantic rows."""
+        active = set(cutouts)
+        row_names = set()
+        if "hat" in active:
+            row_names.add("hat")
+        if active.intersection({"glasses", "earrings"}):
+            row_names.add("face")
+        if active.intersection({"top", "necklace"}):
+            row_names.add("top")
+        rows = _allocate_active_rows(V3_TOP_ROWS, row_names)
+        boxes = dict(V3_TOP_FIXED_SLOTS)
+        if "hat" in rows:
+            boxes["hat"] = _remap_box_y(
+                V3_TOP_FIXED_SLOTS["hat"], V3_TOP_ROWS["hat"], rows["hat"]
+            )
+        if "face" in rows:
+            for name in ("glasses", "earrings_left", "earrings_right"):
+                boxes[name] = _remap_box_y(
+                    V3_TOP_FIXED_SLOTS[name], V3_TOP_ROWS["face"], rows["face"]
+                )
+        if "top" in rows:
+            boxes["top"] = _remap_box_y(
+                V3_TOP_FIXED_SLOTS["top"], V3_TOP_ROWS["top"], rows["top"]
+            )
+            boxes["necklace"] = _remap_box_y(
+                V3_TOP_FIXED_SLOTS["necklace"],
+                V3_TOP_ROWS["top"],
+                rows["top"],
+            )
+        return {
+            name: cls._normal_box_to_pixels(box, width, height)
+            for name, box in boxes.items()
+        }
+
+    @classmethod
+    def _fit_dynamic_slot(cls, cutout, box_name, hard_boxes, slot_padding):
+        anchor = cls._bottom_waist_center(cutout) if box_name == "bottom" else None
+        hard = hard_boxes[box_name]
+        return (
+            _fit_cutout_in_box(cutout, hard, slot_padding, anchor),
+            hard,
+        )
+
+    def _dynamic_earrings(self, cutout, hard_boxes, slot_padding):
+        parts = self._split_pair(cutout)
+        box_names = (
+            ("earrings_left", "earrings_right")
+            if len(parts) == 2
+            else ("earrings_right",)
+        )
+        results = []
+        for part, box_name in zip(parts, box_names):
+            placement, hard = self._fit_dynamic_slot(
+                part, box_name, hard_boxes, slot_padding
+            )
+            label = "earrings L" if box_name.endswith("left") else "earrings R"
+            results.append((part, placement, hard, label))
+        return results
+
     def compose_top(
         self,
         width,
@@ -1369,6 +1602,7 @@ class OutfitReferenceComposerV3Top(OutfitReferenceComposerV2):
             "light_gray": (238, 238, 238),
         }
         canvas = Image.new("RGBA", (width, height), colors[background] + (255,))
+        occupancy = Image.new("L", (width, height), 0)
         records = []
         cutouts = {}
         cutout_layout = {"background_threshold": background_threshold}
@@ -1385,38 +1619,48 @@ class OutfitReferenceComposerV3Top(OutfitReferenceComposerV2):
                 )
             cutouts[slot] = cutout
 
+        hard_boxes = self._dynamic_boxes(cutouts, width, height)
+        complete_set = all(slot in cutouts for slot in V3_TOP_SLOTS)
+
         for slot in V3_TOP_DRAW_ORDER:
             cutout = cutouts.get(slot)
             if cutout is None:
                 continue
             if slot == "earrings":
-                for part, placement, hard, label in self._fixed_earrings(
-                    cutout, width, height, slot_padding
+                for part, placement, hard, label in self._dynamic_earrings(
+                    cutout, hard_boxes, slot_padding
                 ):
                     actual = self._composite_flat(canvas, part, placement)
+                    _add_cutout_to_occupancy(occupancy, part, placement)
                     records.append((hard, actual, label))
                 continue
-            placement, hard = self._fit_fixed_slot(
-                cutout, slot, width, height, slot_padding
+            placement, hard = self._fit_dynamic_slot(
+                cutout, slot, hard_boxes, slot_padding
             )
             actual = self._composite_flat(canvas, cutout, placement)
+            _add_cutout_to_occupancy(occupancy, cutout, placement)
             records.append((hard, actual, slot))
 
         if show_layout_guides:
             self._draw_top_guides(canvas, records, width)
-        output = torch.from_numpy(
-            np.asarray(canvas.convert("RGB")).astype(np.float32) / 255.0
-        ).unsqueeze(0)
+        output = _canvas_to_rgb_tensor(
+            canvas,
+            occupancy,
+            # Guide mode is a layout diagnostic: retain the requested canvas
+            # so coordinates and empty-row outlines remain inspectable.
+            crop=not complete_set and not show_layout_guides,
+            slot_padding=slot_padding,
+        )
         return (output,)
 
 
 class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
-    """Full-body fixed layout with two description-driven overlap modes.
+    """Full-body semantic layout with two description-driven overlap modes.
 
     V3 does not infer semantics from pixels.  Wardrobe Library supplies the
     selected items' layout tags as a tiny JSON object, for example
-    ``{"top":"top_coverwaist","bottom":"bottom_shoehalf"}``.  Missing tags (or tags
-    whose counterpart image is absent) fall back to the exact V2 render.
+    ``{"top":"top_coverwaist","bottom":"bottom_shoehalf"}``.  Missing semantic
+    rows collapse locally; a complete untagged set stays on the exact V2 path.
     """
 
     @classmethod
@@ -1482,6 +1726,93 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             lambda value: 255 if value >= threshold else 0
         ).getbbox()
 
+    @classmethod
+    def _dynamic_boxes(cls, cutouts, width, height):
+        """Collapse empty head/body rows without changing full-set geometry."""
+        active = set(cutouts)
+        head_names = set()
+        if "hat" in active:
+            head_names.add("hat")
+        if active.intersection({"glasses", "earrings"}):
+            head_names.add("face")
+        body_names = set()
+        if active.intersection({"top", "necklace"}):
+            body_names.add("top")
+        if "bottom" in active:
+            body_names.add("bottom")
+        if active.intersection({"socks", "shoes"}):
+            body_names.add("foot")
+
+        head_rows = _allocate_active_rows(V3_FULL_HEAD_ROWS, head_names)
+        body_rows = _allocate_active_rows(V3_FULL_BODY_ROWS, body_names)
+        boxes = dict(V2_FIXED_SLOTS)
+        if "hat" in head_rows:
+            boxes["hat"] = _remap_box_y(
+                V2_FIXED_SLOTS["hat"],
+                V3_FULL_HEAD_ROWS["hat"],
+                head_rows["hat"],
+            )
+        if "face" in head_rows:
+            for name in ("glasses", "earrings_left", "earrings_right"):
+                boxes[name] = _remap_box_y(
+                    V2_FIXED_SLOTS[name],
+                    V3_FULL_HEAD_ROWS["face"],
+                    head_rows["face"],
+                )
+        if "top" in body_rows:
+            boxes["top"] = _remap_box_y(
+                V2_FIXED_SLOTS["top"],
+                V3_FULL_BODY_ROWS["top"],
+                body_rows["top"],
+            )
+            boxes["necklace"] = _remap_box_y(
+                V2_FIXED_SLOTS["necklace"],
+                V3_FULL_BODY_ROWS["top"],
+                body_rows["top"],
+            )
+        if "bottom" in body_rows:
+            boxes["bottom"] = _remap_box_y(
+                V2_FIXED_SLOTS["bottom"],
+                V3_FULL_BODY_ROWS["bottom"],
+                body_rows["bottom"],
+            )
+        if "foot" in body_rows:
+            for name in ("socks", "shoes"):
+                boxes[name] = _remap_box_y(
+                    V2_FIXED_SLOTS[name],
+                    V3_FULL_BODY_ROWS["foot"],
+                    body_rows["foot"],
+                )
+        return {
+            name: cls._normal_box_to_pixels(box, width, height)
+            for name, box in boxes.items()
+        }
+
+    @classmethod
+    def _fit_dynamic_slot(cls, cutout, box_name, hard_boxes, slot_padding):
+        anchor = cls._bottom_waist_center(cutout) if box_name == "bottom" else None
+        hard = hard_boxes[box_name]
+        return (
+            _fit_cutout_in_box(cutout, hard, slot_padding, anchor),
+            hard,
+        )
+
+    def _dynamic_earrings(self, cutout, hard_boxes, slot_padding):
+        parts = self._split_pair(cutout)
+        box_names = (
+            ("earrings_left", "earrings_right")
+            if len(parts) == 2
+            else ("earrings_right",)
+        )
+        results = []
+        for part, box_name in zip(parts, box_names):
+            placement, hard = self._fit_dynamic_slot(
+                part, box_name, hard_boxes, slot_padding
+            )
+            label = "earrings L" if box_name.endswith("left") else "earrings R"
+            results.append((part, placement, hard, label))
+        return results
+
     @staticmethod
     def _scale_to_lower_anchor(cutout, base_placement, target_bottom, axis_x, source_axis_x):
         """Uniformly scale from a fixed upper edge to an object-relative line."""
@@ -1503,22 +1834,28 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
         slot_padding,
         top_coverwaist,
         bottom_shoehalf,
+        dynamic_hard_boxes=None,
     ):
-        """Start with V2 placements, then meet the two semantic boundaries.
+        """Start with active V3 row placements, then meet semantic boundaries.
 
-        The upper edge of each tagged garment remains exactly where V2 put it.
-        Scaling is uniform and anchored to the shared outfit axis.  This makes
-        the result independent of source aspect ratio and avoids claiming an
-        overlap merely because a larger empty hard box was allocated.
+        The upper edge of each tagged garment remains at its dynamically
+        allocated row. Scaling is uniform and anchored to the shared outfit
+        axis. This makes the result independent of source aspect ratio and
+        avoids claiming overlap merely because a larger hard box was allocated.
         """
         placements = {}
         hard_boxes = {}
         for slot, cutout in cutouts.items():
             if slot == "earrings":
                 continue
-            placement, hard = self._fit_fixed_slot(
-                cutout, slot, width, height, slot_padding
-            )
+            if dynamic_hard_boxes is None:
+                placement, hard = self._fit_fixed_slot(
+                    cutout, slot, width, height, slot_padding
+                )
+            else:
+                placement, hard = self._fit_dynamic_slot(
+                    cutout, slot, dynamic_hard_boxes, slot_padding
+                )
             placements[slot] = placement
             hard_boxes[slot] = hard
 
@@ -1648,9 +1985,11 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             and images.get("shoes") is not None
         )
 
-        # This is more than a conceptual fallback: it guarantees V2 and an
-        # untagged V3 remain pixel-identical as V2 evolves.
-        if not top_coverwaist and not bottom_shoehalf:
+        complete_set = all(images.get(slot) is not None for slot in SLOTS)
+        # A complete, untagged outfit remains byte-for-byte on the proven V2
+        # path.  Dynamic compaction is only observable when a semantic row is
+        # actually empty.
+        if complete_set and not top_coverwaist and not bottom_shoehalf:
             return self.compose_fixed(
                 width,
                 height,
@@ -1667,6 +2006,7 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             "light_gray": (238, 238, 238),
         }
         canvas = Image.new("RGBA", (width, height), colors[background] + (255,))
+        occupancy = Image.new("L", (width, height), 0)
         records = []
         cutouts = {}
         cutout_layout = {"background_threshold": background_threshold}
@@ -1684,6 +2024,8 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
                 )
             cutouts[slot] = cutout
 
+        dynamic_hard_boxes = self._dynamic_boxes(cutouts, width, height)
+
         placements, hard_boxes = self._v3_relative_placements(
             cutouts,
             width,
@@ -1691,6 +2033,7 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             slot_padding,
             top_coverwaist,
             bottom_shoehalf,
+            dynamic_hard_boxes,
         )
 
         for slot in self._v3_draw_order(top_coverwaist, bottom_shoehalf):
@@ -1698,10 +2041,11 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             if cutout is None:
                 continue
             if slot == "earrings":
-                for part, placement, hard, label in self._fixed_earrings(
-                    cutout, width, height, slot_padding
+                for part, placement, hard, label in self._dynamic_earrings(
+                    cutout, dynamic_hard_boxes, slot_padding
                 ):
                     actual = self._composite_flat(canvas, part, placement)
+                    _add_cutout_to_occupancy(occupancy, part, placement)
                     records.append((hard, actual, label))
                 continue
             placement = placements[slot]
@@ -1716,6 +2060,7 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             elif slot == "bottom" and bottom_shoehalf:
                 label += " / bottom_shoehalf"
             actual = self._composite_flat(canvas, render_cutout, placement)
+            _add_cutout_to_occupancy(occupancy, render_cutout, placement)
             records.append((hard, actual, label))
             if slot == "bottom":
                 waist_marker = (
@@ -1732,9 +2077,14 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
 
         if show_layout_guides:
             self._draw_fixed_guides(canvas, records, width, waist_marker)
-        output = torch.from_numpy(
-            np.asarray(canvas.convert("RGB")).astype(np.float32) / 255.0
-        ).unsqueeze(0)
+        output = _canvas_to_rgb_tensor(
+            canvas,
+            occupancy,
+            # Guide mode intentionally keeps the full requested canvas; the
+            # production render crops only when a semantic slot is absent.
+            crop=not complete_set and not show_layout_guides,
+            slot_padding=slot_padding,
+        )
         return (output,)
 
 
