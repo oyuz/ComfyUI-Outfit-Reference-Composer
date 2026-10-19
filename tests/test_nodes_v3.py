@@ -19,9 +19,9 @@ from nodes import (  # noqa: E402
     SLOTS,
     V2_DRAW_ORDER,
     V2_FIXED_SLOTS,
-    V3_BOTTOM_SHOE_SEAM_OVERLAP_FRACTION,
-    V3_COVERWAIST_HIP_FRACTION,
-    V3_SHOE_COVER_FRACTION,
+    V3_BOTTOM_SHOEHALF_COVER_FRACTION,
+    V3_BOTTOM_SHOEHALF_SEAM_OVERLAP_FRACTION,
+    V3_TOP_COVERWAIST_HIP_FRACTION,
 )
 
 
@@ -94,8 +94,14 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
     def test_tag_without_required_counterpart_falls_back_to_v2(self):
         all_images = self.images()
         for images, tagged in (
-            ({"top": all_images["top"]}, json.dumps({"top": "coverwaist"})),
-            ({"bottom": all_images["bottom"]}, json.dumps({"bottom": "shoehalf"})),
+            (
+                {"top": all_images["top"]},
+                json.dumps({"top": "top_coverwaist"}),
+            ),
+            (
+                {"bottom": all_images["bottom"]},
+                json.dumps({"bottom": "bottom_shoehalf"}),
+            ),
         ):
             with self.subTest(tagged=tagged):
                 self.assertTrue(
@@ -109,9 +115,11 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
         for payload, message in (
             ("not-json", "not valid JSON"),
             ("[]", "must be a JSON object"),
-            ('{"shoes":"shoehalf"}', "only accepts top and bottom"),
-            ('{"top":"shoehalf"}', "must be 'coverwaist'"),
-            ('{"bottom":"coverwaist"}', "must be 'shoehalf'"),
+            ('{"shoes":"bottom_shoehalf"}', "only accepts top and bottom"),
+            ('{"top":"bottom_shoehalf"}', "must be 'top_coverwaist'"),
+            ('{"bottom":"top_coverwaist"}', "must be 'bottom_shoehalf'"),
+            ('{"top":"coverwaist"}', "must be 'top_coverwaist'"),
+            ('{"bottom":"shoehalf"}', "must be 'bottom_shoehalf'"),
         ):
             with self.subTest(payload=payload), self.assertRaisesRegex(
                 ValueError, message
@@ -141,14 +149,14 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
         shoe_top = shoe_placement[1]
         shoe_height = shoe_placement[3]
         expected_hip = bottom_placement[1] + round(
-            bottom_placement[3] * V3_COVERWAIST_HIP_FRACTION
+            bottom_placement[3] * V3_TOP_COVERWAIST_HIP_FRACTION
         )
         expected_shoe_boundary = shoe_top + round(
-            shoe_height * V3_SHOE_COVER_FRACTION
+            shoe_height * V3_BOTTOM_SHOEHALF_COVER_FRACTION
         )
         expected_visible_hem = expected_shoe_boundary + max(
             1,
-            round(shoe_height * V3_BOTTOM_SHOE_SEAM_OVERLAP_FRACTION),
+            round(shoe_height * V3_BOTTOM_SHOEHALF_SEAM_OVERLAP_FRACTION),
         )
         self.assertEqual(top_bottom, expected_hip)
         visible_bbox = self.v3._visible_alpha_bbox(cutouts["bottom"])
@@ -195,7 +203,7 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
         placement, _ = self.v3._fit_fixed_slot(shoe, "shoes", 1536, 2048, 10)
         toe, toe_placement = self.v3._shoe_toe_third(shoe, placement)
         boundary = placement[1] + round(
-            placement[3] * V3_SHOE_COVER_FRACTION
+            placement[3] * V3_BOTTOM_SHOEHALF_COVER_FRACTION
         )
         self.assertEqual(toe_placement[1], boundary)
         self.assertEqual(toe_placement[0], placement[0])
@@ -223,7 +231,9 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             cutouts["shoes"], placements["shoes"]
         )
         pixels = self.render_v3(
-            json.dumps({"top": "coverwaist", "bottom": "shoehalf"}),
+            json.dumps(
+                {"top": "top_coverwaist", "bottom": "bottom_shoehalf"}
+            ),
             **images,
         )[0].numpy()
         blue = (
@@ -243,7 +253,7 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             24,
             0,
             False,
-            layout_tags_json=json.dumps({"bottom": "shoehalf"}),
+            layout_tags_json=json.dumps({"bottom": "bottom_shoehalf"}),
             **self.images(),
         )[0][0].numpy()
         images = self.images()
@@ -257,7 +267,7 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             cutouts, 1000, 1000, 0, False, True
         )
         nominal_boundary = placements["shoes"][1] + round(
-            placements["shoes"][3] * V3_SHOE_COVER_FRACTION
+            placements["shoes"][3] * V3_BOTTOM_SHOEHALF_COVER_FRACTION
         )
         axis_x = round(0.46 * 1000)
 
@@ -286,7 +296,9 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
 
     def test_both_tags_visibly_control_the_two_overlap_regions(self):
         output = self.render_v3(
-            json.dumps({"top": "coverwaist", "bottom": "shoehalf"}),
+            json.dumps(
+                {"top": "top_coverwaist", "bottom": "bottom_shoehalf"}
+            ),
             **self.images(),
         )[0].numpy()
 
@@ -304,7 +316,7 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
         boxes = copy.deepcopy(V2_FIXED_SLOTS)
         order = tuple(V2_DRAW_ORDER)
         self.render_v3(
-            '{"top":"coverwaist","bottom":"shoehalf"}',
+            '{"top":"top_coverwaist","bottom":"bottom_shoehalf"}',
             **self.images(),
         )
         self.assertEqual(V2_FIXED_SLOTS, boxes)
