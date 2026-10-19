@@ -71,19 +71,19 @@ V2_DRAW_ORDER = (
 # V3 starts from V2's exact tight-cutout placements, then resolves the two
 # semantically ambiguous garment boundaries against the *actual neighbouring
 # item*.  These fractions are object-relative, not canvas hard-box
-# coordinates: a coverwaist top reaches 30% into the placed bottom, and a
-# shoehalf bottom reaches the placed footwear's two-thirds line plus a tiny
+# coordinates: a top_coverwaist top reaches 30% into the placed bottom, and a
+# bottom_shoehalf bottom reaches the placed footwear's two-thirds line plus a tiny
 # seam guard.  Only the lower third of the shoe layer is retained so wide
 # shoes cannot leak around narrow trouser legs above the intended toe band.
-V3_COVERWAIST_HIP_FRACTION = 0.30
-V3_SHOE_COVER_FRACTION = 2.0 / 3.0
+V3_TOP_COVERWAIST_HIP_FRACTION = 0.30
+V3_BOTTOM_SHOEHALF_COVER_FRACTION = 2.0 / 3.0
 # The footwear crop still starts at the exact two-thirds boundary.  Extend the
 # visible trouser hem a few pixels past that line so antialiasing and curved
 # shoe/toe silhouettes cannot expose the canvas between the two layers.
-V3_BOTTOM_SHOE_SEAM_OVERLAP_FRACTION = 0.03
+V3_BOTTOM_SHOEHALF_SEAM_OVERLAP_FRACTION = 0.03
 V3_LAYOUT_TAGS = {
-    "top": "coverwaist",
-    "bottom": "shoehalf",
+    "top": "top_coverwaist",
+    "bottom": "bottom_shoehalf",
 }
 
 # V3_TOP is a separate node, not a mode switch on V2. It keeps the same
@@ -1415,7 +1415,7 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
 
     V3 does not infer semantics from pixels.  Wardrobe Library supplies the
     selected items' layout tags as a tiny JSON object, for example
-    ``{"top":"coverwaist","bottom":"shoehalf"}``.  Missing tags (or tags
+    ``{"top":"top_coverwaist","bottom":"bottom_shoehalf"}``.  Missing tags (or tags
     whose counterpart image is absent) fall back to the exact V2 render.
     """
 
@@ -1501,8 +1501,8 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
         width,
         height,
         slot_padding,
-        coverwaist,
-        shoehalf,
+        top_coverwaist,
+        bottom_shoehalf,
     ):
         """Start with V2 placements, then meet the two semantic boundaries.
 
@@ -1523,14 +1523,20 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             hard_boxes[slot] = hard
 
         axis_x = V2_OUTFIT_CENTER_X * width
-        if shoehalf:
+        if bottom_shoehalf:
             shoe_placement = placements["shoes"]
             shoe_top = shoe_placement[1]
             shoe_height = shoe_placement[3]
-            target_hem = shoe_top + int(round(shoe_height * V3_SHOE_COVER_FRACTION))
+            target_hem = shoe_top + int(
+                round(shoe_height * V3_BOTTOM_SHOEHALF_COVER_FRACTION)
+            )
             seam_overlap = max(
                 1,
-                int(round(shoe_height * V3_BOTTOM_SHOE_SEAM_OVERLAP_FRACTION)),
+                int(
+                    round(
+                        shoe_height * V3_BOTTOM_SHOEHALF_SEAM_OVERLAP_FRACTION
+                    )
+                ),
             )
             visible_target_hem = target_hem + seam_overlap
             bottom_cutout = cutouts["bottom"]
@@ -1561,10 +1567,10 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
                 self._placement_box(placements["bottom"]),
             )
 
-        if coverwaist:
+        if top_coverwaist:
             bottom_placement = placements["bottom"]
             hip_y = bottom_placement[1] + int(
-                round(bottom_placement[3] * V3_COVERWAIST_HIP_FRACTION)
+                round(bottom_placement[3] * V3_TOP_COVERWAIST_HIP_FRACTION)
             )
             top_cutout = cutouts["top"]
             placements["top"] = self._scale_to_lower_anchor(
@@ -1589,10 +1595,14 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
         behind a narrow trouser cutout) guarantees no shoe upper can leak at
         the sides above the semantic two-thirds coverage line.
         """
-        source_start = int(round(cutout.height * V3_SHOE_COVER_FRACTION))
+        source_start = int(
+            round(cutout.height * V3_BOTTOM_SHOEHALF_COVER_FRACTION)
+        )
         source_start = min(max(0, source_start), cutout.height - 1)
         x, y, target_width, target_height = placement
-        target_start = int(round(target_height * V3_SHOE_COVER_FRACTION))
+        target_start = int(
+            round(target_height * V3_BOTTOM_SHOEHALF_COVER_FRACTION)
+        )
         target_start = min(max(0, target_start), target_height - 1)
         toe = cutout.crop((0, source_start, cutout.width, cutout.height))
         toe_placement = (
@@ -1604,12 +1614,12 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
         return toe, toe_placement
 
     @staticmethod
-    def _v3_draw_order(coverwaist, shoehalf):
-        if coverwaist and shoehalf:
+    def _v3_draw_order(top_coverwaist, bottom_shoehalf):
+        if top_coverwaist and bottom_shoehalf:
             main = ("socks", "shoes", "bottom", "top")
-        elif coverwaist:
+        elif top_coverwaist:
             main = ("bottom", "top", "socks", "shoes")
-        elif shoehalf:
+        elif bottom_shoehalf:
             main = ("top", "socks", "shoes", "bottom")
         else:
             main = V2_DRAW_ORDER[:4]
@@ -1627,20 +1637,20 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
         **images,
     ):
         tags = self._parse_layout_tags(layout_tags_json)
-        coverwaist = (
-            tags.get("top") == "coverwaist"
+        top_coverwaist = (
+            tags.get("top") == "top_coverwaist"
             and images.get("top") is not None
             and images.get("bottom") is not None
         )
-        shoehalf = (
-            tags.get("bottom") == "shoehalf"
+        bottom_shoehalf = (
+            tags.get("bottom") == "bottom_shoehalf"
             and images.get("bottom") is not None
             and images.get("shoes") is not None
         )
 
         # This is more than a conceptual fallback: it guarantees V2 and an
         # untagged V3 remain pixel-identical as V2 evolves.
-        if not coverwaist and not shoehalf:
+        if not top_coverwaist and not bottom_shoehalf:
             return self.compose_fixed(
                 width,
                 height,
@@ -1679,11 +1689,11 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             width,
             height,
             slot_padding,
-            coverwaist,
-            shoehalf,
+            top_coverwaist,
+            bottom_shoehalf,
         )
 
-        for slot in self._v3_draw_order(coverwaist, shoehalf):
+        for slot in self._v3_draw_order(top_coverwaist, bottom_shoehalf):
             cutout = cutouts.get(slot)
             if cutout is None:
                 continue
@@ -1698,13 +1708,13 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             hard = hard_boxes[slot]
             render_cutout = cutout
             label = slot
-            if slot == "shoes" and shoehalf:
+            if slot == "shoes" and bottom_shoehalf:
                 render_cutout, placement = self._shoe_toe_third(cutout, placement)
                 label += " / toe 1/3"
-            elif slot == "top" and coverwaist:
-                label += " / coverwaist"
-            elif slot == "bottom" and shoehalf:
-                label += " / shoehalf"
+            elif slot == "top" and top_coverwaist:
+                label += " / top_coverwaist"
+            elif slot == "bottom" and bottom_shoehalf:
+                label += " / bottom_shoehalf"
             actual = self._composite_flat(canvas, render_cutout, placement)
             records.append((hard, actual, label))
             if slot == "bottom":
