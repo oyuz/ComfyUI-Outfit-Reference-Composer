@@ -15,7 +15,7 @@ from nodes import OutfitReferenceComposer, SLOTS, TEMPLATE  # noqa: E402
 
 
 def image_tensor(image):
-    array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    array = np.asarray(image.convert("RGBA"), dtype=np.float32) / 255.0
     return torch.from_numpy(array).unsqueeze(0)
 
 
@@ -36,15 +36,30 @@ class OutfitReferenceComposerTests(unittest.TestCase):
         self.assertEqual(self.node.RETURN_TYPES, ("IMAGE",))
         self.assertEqual(self.node.RETURN_NAMES, ("outfit_reference",))
 
-    def test_cutout_ignores_disconnected_edge_watermark(self):
-        image = Image.new("RGB", (512, 512), "white")
+    def test_cutout_uses_source_alpha_and_keeps_existing_padding(self):
+        image = Image.new("RGBA", (512, 512), (215, 215, 215, 0))
         draw = ImageDraw.Draw(image)
-        draw.rectangle((150, 100, 360, 410), fill=(50, 70, 95))
-        draw.text((2, 480), "watermark", fill=(215, 215, 215))
-        cutout = self.node._cutout(image.convert("RGBA"), "top", {})
-        self.assertIsNotNone(cutout)
-        self.assertLess(cutout.width, 260)
-        self.assertLess(cutout.height, 360)
+        draw.rectangle((150, 100, 360, 410), fill=(50, 70, 95, 255))
+        # RGB in fully transparent pixels is intentionally irrelevant.
+        draw.text((2, 480), "watermark", fill=(20, 20, 20, 0))
+        cutout = self.node._cutout(image, "top", {"background_threshold": 4})
+        self.assertEqual(cutout.size, (215, 315))
+        self.assertEqual(cutout.getpixel((0, 0))[3], 0)
+        self.assertEqual(cutout.getpixel((2, 2)), (50, 70, 95, 255))
+
+    def test_background_threshold_is_compatibility_noop(self):
+        image = Image.new("RGBA", (80, 80), (0, 0, 0, 0))
+        ImageDraw.Draw(image).rectangle((20, 18, 59, 61), fill=(220, 30, 30, 255))
+        low = self.node._cutout(image, "top", {"background_threshold": 4})
+        high = self.node._cutout(image, "top", {"background_threshold": 100})
+        self.assertTrue(np.array_equal(np.asarray(low), np.asarray(high)))
+
+    def test_rgb_input_is_rejected_with_preserve_alpha_guidance(self):
+        rgb = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        with self.assertRaisesRegex(
+            ValueError, "four-channel RGBA IMAGE.*Preserve Alpha"
+        ):
+            self.node._image(rgb)
 
     def test_top_resize_preserves_source_aspect(self):
         for cutout, layout in (
@@ -341,8 +356,10 @@ class OutfitReferenceComposerTests(unittest.TestCase):
         self.assertGreaterEqual(socks_box[1] - (bottom_box[1] + bottom_box[3]), 8)
 
     def test_compose_accepts_direct_item_fields(self):
-        product = Image.new("RGB", (256, 256), "white")
-        ImageDraw.Draw(product).rectangle((70, 40, 186, 220), fill=(25, 25, 25))
+        product = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+        ImageDraw.Draw(product).rectangle(
+            (70, 40, 186, 220), fill=(25, 25, 25, 255)
+        )
         spec = {
             "items": {
                 "top": {
@@ -520,10 +537,10 @@ class OutfitReferenceComposerTests(unittest.TestCase):
     def test_template_has_explicit_hip_axis(self):
         self.assertAlmostEqual(TEMPLATE["landmarks"]["hip_y"], 0.49)
 
-    def test_connected_blank_image_reports_cutout_failure(self):
-        blank = Image.new("RGB", (256, 256), "white")
+    def test_connected_blank_image_reports_alpha_failure(self):
+        blank = Image.new("RGBA", (256, 256), (255, 255, 255, 0))
         spec = {"items": {"top": {"item_id": "blank", "slot": "top"}}}
-        with self.assertRaisesRegex(ValueError, "top image has no detectable foreground"):
+        with self.assertRaisesRegex(ValueError, "no visible pixels in its alpha channel"):
             self.node.compose(
                 json.dumps(spec),
                 768,

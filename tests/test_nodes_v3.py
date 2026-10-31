@@ -3,7 +3,6 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from unittest import mock
 
 import numpy as np
 import torch
@@ -155,21 +154,39 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
         self.assertEqual(hat_only[1], with_face[1])
         self.assertGreater(hat_only[3], with_face[3])
 
-    def test_rgba_alpha_bypasses_background_segmentation(self):
+    def test_rgba_alpha_is_the_only_cutout_mask(self):
         image = Image.new("RGBA", (80, 80), (12, 34, 56, 0))
         ImageDraw.Draw(image).rectangle((20, 18, 59, 61), fill=(220, 30, 30, 255))
         tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).unsqueeze(0)
-        with mock.patch.object(
-            OutfitReferenceComposerV3,
-            "_component_keep_mask",
-            side_effect=AssertionError("RGBA must not be re-segmented"),
-        ):
-            cutout = self.v3._cutout(
-                self.v3._image(tensor), "top", {"background_threshold": 24}
-            )
-        self.assertIsNotNone(cutout)
+        low = self.v3._cutout(
+            self.v3._image(tensor), "top", {"background_threshold": 4}
+        )
+        high = self.v3._cutout(
+            self.v3._image(tensor), "top", {"background_threshold": 100}
+        )
+        self.assertTrue(np.array_equal(np.asarray(low), np.asarray(high)))
+        cutout = low
         self.assertLess(cutout.width, image.width)
         self.assertLess(cutout.height, image.height)
+
+    def test_v2_v3_and_v3_top_reject_rgb_input_without_alpha(self):
+        rgb = torch.zeros((1, 80, 80, 3), dtype=torch.float32)
+        renderers = (
+            lambda: self.v2.compose_fixed(
+                768, 1024, "white", 24, 8, False, top=rgb
+            ),
+            lambda: self.v3.compose_v3(
+                768, 1024, "white", 24, 8, False, "{}", top=rgb
+            ),
+            lambda: OutfitReferenceComposerV3Top().compose_top(
+                768, 1024, "white", 24, 8, False, top=rgb
+            ),
+        )
+        for render in renderers:
+            with self.subTest(render=render), self.assertRaisesRegex(
+                ValueError, "four-channel RGBA IMAGE.*Preserve Alpha"
+            ):
+                render()
 
     def test_tags_are_strict_and_actionable(self):
         for payload, message in (

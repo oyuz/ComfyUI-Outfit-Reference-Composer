@@ -210,9 +210,11 @@ class OutfitReferenceComposerV2Tests(unittest.TestCase):
         self.assertEqual(len(placements), 1)
         self.assertEqual(placements[0][3], "earrings R")
 
-    def test_blank_white_input_reports_foreground_error(self):
+    def test_fully_opaque_input_reports_alpha_error(self):
         blank = rgba_tensor(Image.new("RGB", (256, 256), "white"))
-        with self.assertRaisesRegex(ValueError, "no detectable foreground"):
+        with self.assertRaisesRegex(
+            ValueError, "no usable transparent background.*Preserve Alpha"
+        ):
             self.node.compose_fixed(
                 768, 1024, "white", 24, 8, False, top=blank
             )
