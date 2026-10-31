@@ -17,7 +17,7 @@
 - 帽子、鞋和手腕饰品按约五头身的 3D 卡通人物比例校准；手串与手镯按可见环体高度归一，避免源图留白造成夸张尺寸差。
 - 鞋和袜子直接使用输入图中的完整一对，不复制、不镜像单只。
 - `show_layout_guides` 可以显示安全区、真实输出框和关键锚点；正式出图时关闭即可。
-- 自动过滤白色背景中的离散水印和噪点，避免它们撑大前景范围。
+- 只接受带有效透明背景的四通道 RGBA 单品图；节点不会根据 RGB 颜色重新抠背。
 
 ## V3_TOP（Upper Body Only，无 JSON）
 
@@ -28,7 +28,7 @@
 - 帽子、眼镜／耳环、颈饰／上装按语义行排版；缺少某一行时，相邻语义行会使用释放出的纵向空间。例如未选择眼镜和耳环时，帽子会在原帽子＋面部区域内下移并放大。
 - 布局专门面向上装以上区域，五类单品在保持完整、等比缩放的前提下尽量占满画布；帽子、眼镜、颈饰和上装的主列统一居中。
 - `necklace` 最后绘制，可以覆盖 `top` 的领口和上胸区域；其他类别保持各自固定位置。
-- 白底清理、透明通道读取、`contain` 等比适配、`background_threshold`、`slot_padding` 和 `show_layout_guides` 的逻辑与 V2 相同。
+- RGBA 透明通道紧裁、`contain` 等比适配、`slot_padding` 和 `show_layout_guides` 的逻辑与 V2 相同；`background_threshold` 仅为旧工作流兼容保留，不再参与计算。
 - 五类都连接时仍使用原 V3_TOP 坐标与请求画布尺寸；有空槽时，正式输出会按真实 alpha 占用范围保留安全边距，并向外对齐到 64 像素倍数后裁掉外围空白。开启 `show_layout_guides` 时保留完整请求画布，便于检查坐标。
 - V3_TOP 是新增的独立节点，不会替换或修改 V2；V2 仍保留原有十个类别输入及原有排版逻辑。
 
@@ -36,7 +36,7 @@
 
 节点名称为 `Outfit Reference Composer V3 (Tagged Overlap)`。
 
-- 保留 V2 的十个图片输入、清底、等比缩放、固定附件分区和调试框逻辑。
+- 保留 V2 的十个图片输入、Alpha 紧裁、等比缩放、固定附件分区和调试框逻辑，不再执行 RGB／浅色背景抠背。
 - 额外接收 Wardrobe Library 输出的 `layout_tags_json`；用户仍只需在衣橱库里选择单品，不需要手填长度数值。
 - `top = top_coverwaist` 时，以最终下装的实际紧裁切框为基准：上装保持原上沿、沿中心轴等比放大，下摆精确到下装高度 30% 的胯骨线，并在下装之后绘制。
 - `bottom = bottom_shoehalf` 时，以鞋的实际紧裁切框为基准：裤装保持原上沿与腰部中心轴，并按真实可见 alpha 下沿等比延伸到鞋高 2/3 的位置（透明留边不参与落点计算），再向鞋层覆盖一小段抗锯齿安全量；鞋图本身仍严格只保留下方 1/3，避免宽鞋或靴子从裤腿两侧露出鞋帮，同时消除透明留边与弧形轮廓造成的画布白缝。
@@ -52,9 +52,9 @@
 - 保留 `top`、`bottom`、`socks`、`shoes`、`hat`、`bag`、`glasses`、`necklace`、`earrings` 和 `bracelet` 十个图片输入。
 - 输入端口名是唯一类别信息，不接收也不解析 `outfit_spec`。
 - 每个类别使用永久固定分区；项链／颈饰有意覆盖上装的领口与上胸区域并最后绘制，其余分区互不重叠。未连接的类别保持空白，不会引起其他单品移动。
-- 单品先去除白底或读取透明通道，再裁掉源图留白，以 `contain` 方式等比最大化放进对应分区。
+- 单品必须由上游提供有效 RGBA 透明通道；节点仅按源 Alpha 裁掉透明留白，再以 `contain` 方式等比最大化放进对应分区，不会重新抠背。
 - 不根据高腰／低腰、宽松／修身、长裤／短裤等描述改变比例，也不添加合成阴影。
-- `background_threshold` 统一控制白底识别阈值，`slot_padding` 控制每个固定框的内边距。
+- `background_threshold` 为兼容旧工作流保留但已是 no-op；`slot_padding` 控制每个固定框的内边距。
 - `show_layout_guides` 开启时，红框表示固定分区，蓝框表示单品实际输出范围。
 - 袜子固定在鞋子左侧，与鞋子共享画面底部纵向区域；鞋框因此拥有更大的高度，短鞋与长靴都会完整显示。
 - 颈饰、上装、下装和鞋子共用画布宽度 46% 处的纵向中心轴；调试图中的灰色虚线可用于核对，正式出图不会显示。袜子相应左移以保持与鞋子不重叠。
@@ -77,14 +77,14 @@
 1. 添加 `Wardrobe Library Selector / 可视化衣橱库` 和 `Outfit Reference Composer V3 (Tagged Overlap)`。
 2. 将衣橱库的图片输出接到 V3 同名图片输入。
 3. 将衣橱库最后的 `layout_tags_json` 输出接到 V3 的同名输入；不要把 `selected_items_json` 接错。
-4. 建议先使用默认 `1536 × 2048`、`background_threshold = 24`、`slot_padding = 10`，并开启 `show_layout_guides` 检查裤头和鞋面两处重叠。调试模式固定保留完整画布。
+4. 建议先使用默认 `1536 × 2048`、`slot_padding = 10`，并开启 `show_layout_guides` 检查裤头和鞋面两处重叠；`background_threshold` 留在默认值即可（兼容字段，已不参与计算）。调试模式固定保留完整画布。
 5. 确认效果后关闭调试框；有空槽的正式结果会自动裁掉外围空白并保持 64 像素倍数，再将 `outfit_reference` 接到下游图片参考输入。
 
 ### V3_TOP Upper Body Only
 
 1. 添加 `Outfit Reference Composer V3_TOP (Upper Body Only)`；它可以与 V2 节点同时放在同一工作流中。
 2. 仅为需要的 `top`、`hat`、`glasses`、`earrings` 和 `necklace` 创建 `Load Image`，并接到节点同名输入。
-3. 不需要 JSON；建议先使用默认 `1536 × 2048`、`background_threshold = 24` 和 `slot_padding = 10`。
+3. 不需要 JSON；建议先使用默认 `1536 × 2048` 和 `slot_padding = 10`；`background_threshold` 留在默认值即可（兼容字段，已不参与计算）。
 4. 初次测试开启 `show_layout_guides`，确认主列居中、动态语义行和颈饰覆盖关系；确认后关闭。关闭后有空槽的结果会自动做内容裁切。
 5. 将唯一输出 `outfit_reference` 接到 Flux 的图片参考输入。
 
@@ -92,7 +92,7 @@
 
 1. 添加 `Outfit Reference Composer V2 (Fixed Slots)`。
 2. 为所选单品创建 `Load Image`，接到节点同名输入。
-3. 不需要 JSON；建议先使用默认 `1536 × 2048`、`background_threshold = 24` 和 `slot_padding = 10`。
+3. 不需要 JSON；建议先使用默认 `1536 × 2048` 和 `slot_padding = 10`；`background_threshold` 留在默认值即可（兼容字段，已不参与计算）。
 4. 初次测试开启 `show_layout_guides`；确认后关闭。
 5. 将唯一输出 `outfit_reference` 接到 Flux 的图片参考输入。
 
@@ -184,7 +184,7 @@ JSON 必须是一个以 slot 为 key 的对象；不能在同一个对象中重�
 
 这一版仍是确定性的启发式布局，不会识别真实人体或真实服装缝线。严格等比意味着：当某张源图本身的长宽比例与描述目标冲突时，节点优先保证“不拉伸、完整、无重叠”，肩/胯尺度其次，长度作为语义目标；不会为了同时贴满宽高锚点而破坏单品比例。旧 JSON 中的 `max_axis_distortion` 可以保留，但第二轮起不会再允许它开启非等比拉伸。
 
-浅色单品难以从白底分离时，可以添加 `background_threshold` 调整背景阈值；有效范围 `4`～`100`，建议先尝试 `14`～`34`。
+`background_threshold` 仍显示在节点上，以保证旧工作流可以加载，但不再影响任何版本的输出。
 
 如果 `calf` / `ankle` / `floor` 长度的裤或裙与袜子同时输入，节点会报出明确错误，因为它们无法在“不遮挡”的身体坐标中同时占用腿部区域。袜子应搭配 `thigh` / `knee` 长度的短裤或短裙。
 
@@ -193,6 +193,6 @@ JSON 必须是一个以 slot 为 key 的对象；不能在同一个对象中重�
 - 单品正面、完整、居中。
 - 鞋与袜子为已经摆好的完整一对。
 - 每个 slot 只接一张图片；批量 IMAGE 需要先拆分。
-- 白色或浅灰色背景效果最好，节点会自动做 MVP 背景清理。
-- V3 / V3_TOP 接到能输出四通道 `IMAGE` 的上游节点时，会直接使用源 alpha 做紧裁切与拼合，不再按 RGB 重新抠背；三通道白底图片仍走原背景清理逻辑。
-- 标准 ComfyUI `Load Image` 的具体通道行为随版本而异。需要稳定保留透明通道时，请使用明确输出 RGBA `IMAGE` 的衣橱库节点；无需另接 mask 节点。
+- 必须输入带真实透明背景的四通道 RGBA；三通道 RGB 或 Alpha 全不透明的图片会直接报错，不再尝试白底清理。
+- V2、V3 与 V3_TOP 都只读取源 Alpha 做紧裁切和拼合，不根据 RGB 像素生成或修改蒙版。
+- 标准 ComfyUI `Load Image` 的具体通道行为随版本而异。建议使用 Wardrobe Library，并选择 `保留透明通道 / Preserve Alpha`；无需另接 mask 节点。

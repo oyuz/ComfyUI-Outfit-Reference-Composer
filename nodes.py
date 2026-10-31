@@ -1,5 +1,4 @@
 import json
-from collections import deque
 
 import numpy as np
 import torch
@@ -413,135 +412,40 @@ class OutfitReferenceComposer:
             raise ValueError(
                 "each outfit slot accepts exactly one IMAGE; split image batches before this node"
             )
+        channels = int(tensor.shape[-1])
+        if channels != 4:
+            raise ValueError(
+                "each outfit slot requires a four-channel RGBA IMAGE with preserved alpha; "
+                f"received {channels} channels. In Wardrobe Library choose "
+                "'保留透明通道 / Preserve Alpha'"
+            )
         arr = tensor[0].detach().cpu().numpy()
         arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
-        if arr.shape[-1] == 4:
-            return Image.fromarray(arr, "RGBA")
-        return Image.fromarray(arr[..., :3], "RGB").convert("RGBA")
-
-    @staticmethod
-    def _components(binary):
-        """Return connected components for a small boolean mask."""
-        height, width = binary.shape
-        visited = np.zeros_like(binary, dtype=bool)
-        components = []
-
-        for y in range(height):
-            for x in range(width):
-                if not binary[y, x] or visited[y, x]:
-                    continue
-                queue = deque([(x, y)])
-                visited[y, x] = True
-                pixels = []
-                min_x = max_x = x
-                min_y = max_y = y
-                while queue:
-                    px, py = queue.popleft()
-                    pixels.append((px, py))
-                    min_x = min(min_x, px)
-                    max_x = max(max_x, px)
-                    min_y = min(min_y, py)
-                    max_y = max(max_y, py)
-                    for nx, ny in ((px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)):
-                        if 0 <= nx < width and 0 <= ny < height and binary[ny, nx] and not visited[ny, nx]:
-                            visited[ny, nx] = True
-                            queue.append((nx, ny))
-                components.append(
-                    {
-                        "pixels": pixels,
-                        "area": len(pixels),
-                        "bbox": (min_x, min_y, max_x + 1, max_y + 1),
-                    }
-                )
-        return components
-
-    @classmethod
-    def _component_keep_mask(cls, binary, slot):
-        """Keep the product while rejecting disconnected watermarks and dust."""
-        height, width = binary.shape
-        max_side = 256
-        scale = min(1.0, max_side / max(width, height))
-        small_size = (max(1, int(width * scale)), max(1, int(height * scale)))
-        small = Image.fromarray((binary * 255).astype(np.uint8), "L").resize(
-            small_size, Image.Resampling.NEAREST
-        )
-        small = small.filter(ImageFilter.MaxFilter(3))
-        small_binary = np.asarray(small) > 0
-        components = cls._components(small_binary)
-        if not components:
-            return np.ones((height, width), dtype=np.uint8) * 255
-
-        components.sort(key=lambda component: component["area"], reverse=True)
-        largest = components[0]["area"]
-        pair_like = slot in {"socks", "shoes", "glasses", "earrings", "bracelet"}
-        max_components = 8 if pair_like else (12 if slot == "necklace" else 5)
-        selected = []
-        for component in components:
-            if len(selected) >= max_components:
-                break
-            relative_area = component["area"] / largest
-            x0, y0, x1, y1 = component["bbox"]
-            centre_x = (x0 + x1) / (2 * small_size[0])
-            centre_y = (y0 + y1) / (2 * small_size[1])
-            is_central = 0.08 <= centre_x <= 0.92 and 0.05 <= centre_y <= 0.95
-            if not selected:
-                selected.append(component)
-            elif relative_area >= 0.018 and (is_central or relative_area >= 0.18):
-                selected.append(component)
-
-        keep_small = np.zeros((small_size[1], small_size[0]), dtype=np.uint8)
-        for component in selected:
-            for x, y in component["pixels"]:
-                keep_small[y, x] = 255
-        keep_small = np.asarray(
-            Image.fromarray(keep_small, "L").filter(ImageFilter.MaxFilter(5))
-        )
-        return np.asarray(
-            Image.fromarray(keep_small, "L").resize((width, height), Image.Resampling.NEAREST)
-        )
+        return Image.fromarray(arr, "RGBA")
 
     @classmethod
     def _cutout(cls, image, slot, layout):
-        """Create a tight product cutout from alpha or a light studio background."""
-        source_alpha = np.asarray(image.getchannel("A"))
-        if source_alpha.min() < 250:
-            alpha = source_alpha
-        else:
-            rgb = np.asarray(image.convert("RGB")).astype(np.int16)
-            height, width = rgb.shape[:2]
-            border_size = max(2, int(min(width, height) * 0.015))
-            border = np.concatenate(
-                (
-                    rgb[:border_size].reshape(-1, 3),
-                    rgb[-border_size:].reshape(-1, 3),
-                    rgb[:, :border_size].reshape(-1, 3),
-                    rgb[:, -border_size:].reshape(-1, 3),
-                ),
-                axis=0,
-            )
-            background_rgb = np.median(border, axis=0)
-            distance = np.max(np.abs(rgb - background_rgb), axis=2).astype(np.float32)
-            border_distance = np.max(np.abs(border - background_rgb), axis=1)
-            automatic_threshold = float(np.percentile(border_distance, 90)) + 10.0
-            try:
-                threshold = float(
-                    layout.get("background_threshold", np.clip(automatic_threshold, 18, 34))
-                )
-            except (TypeError, ValueError) as error:
-                raise ValueError("background_threshold must be a number from 4 to 100") from error
-            if not 4 <= threshold <= 100:
-                raise ValueError("background_threshold must be a number from 4 to 100")
-            binary = distance >= threshold
-            keep = cls._component_keep_mask(binary, slot).astype(np.float32) / 255.0
-            lower = max(4.0, threshold * 0.45)
-            upper = max(lower + 1.0, threshold * 1.35)
-            soft_alpha = np.clip((distance - lower) / (upper - lower), 0.0, 1.0)
-            alpha = np.round(soft_alpha * keep * 255.0).astype(np.uint8)
+        """Tightly crop an existing RGBA cutout without deriving a new mask.
 
-        alpha_image = Image.fromarray(alpha, "L")
+        ``background_threshold`` remains in the public node schema so saved
+        workflows keep loading, but it is intentionally ignored.  Product
+        isolation must happen upstream and arrive through the source alpha.
+        """
+        del layout
+        alpha_image = image.getchannel("A")
+        source_alpha = np.asarray(alpha_image)
         bbox = alpha_image.point(lambda value: 255 if value >= 8 else 0).getbbox()
         if not bbox:
-            return None
+            raise ValueError(
+                f"{slot} image has no visible pixels in its alpha channel; "
+                "connect a non-empty RGBA cutout"
+            )
+        if source_alpha.min() >= 250:
+            raise ValueError(
+                f"{slot} image has no usable transparent background (alpha is fully opaque); "
+                "connect an RGBA cutout and choose '保留透明通道 / Preserve Alpha' "
+                "in Wardrobe Library"
+            )
         pad = max(2, int(min(image.size) * 0.002))
         bbox = (
             max(0, bbox[0] - pad),
@@ -549,9 +453,7 @@ class OutfitReferenceComposer:
             min(image.width, bbox[2] + pad),
             min(image.height, bbox[3] + pad),
         )
-        rgba = image.convert("RGBA")
-        rgba.putalpha(alpha_image)
-        return rgba.crop(bbox)
+        return image.crop(bbox)
 
     @staticmethod
     def _parse(spec):
@@ -1206,8 +1108,8 @@ class OutfitReferenceComposer:
             cutout = self._cutout(self._image(tensor), slot, layout)
             if cutout is None:
                 raise ValueError(
-                    f"{slot} image has no detectable foreground; check the image/background "
-                    "or set background_threshold in that item's JSON"
+                    f"{slot} image has no visible alpha foreground; connect a non-empty "
+                    "RGBA cutout"
                 )
             cutouts[slot] = cutout
 
@@ -1431,8 +1333,8 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
             cutout = self._cutout(self._image(tensor), slot, cutout_layout)
             if cutout is None:
                 raise ValueError(
-                    f"{slot} image has no detectable foreground; check the image/background "
-                    "or adjust background_threshold"
+                    f"{slot} image has no visible alpha foreground; connect a non-empty "
+                    "RGBA cutout"
                 )
             cutouts[slot] = cutout
 
@@ -1614,8 +1516,8 @@ class OutfitReferenceComposerV3Top(OutfitReferenceComposerV2):
             cutout = self._cutout(self._image(tensor), slot, cutout_layout)
             if cutout is None:
                 raise ValueError(
-                    f"{slot} image has no detectable foreground; check the image/background "
-                    "or adjust background_threshold"
+                    f"{slot} image has no visible alpha foreground; connect a non-empty "
+                    "RGBA cutout"
                 )
             cutouts[slot] = cutout
 
@@ -2019,8 +1921,8 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             cutout = self._cutout(self._image(tensor), slot, cutout_layout)
             if cutout is None:
                 raise ValueError(
-                    f"{slot} image has no detectable foreground; check the image/background "
-                    "or adjust background_threshold"
+                    f"{slot} image has no visible alpha foreground; connect a non-empty "
+                    "RGBA cutout"
                 )
             cutouts[slot] = cutout
 
