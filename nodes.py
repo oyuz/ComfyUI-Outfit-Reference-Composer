@@ -8,7 +8,6 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 SLOTS = (
     "top",
     "bottom",
-    "socks",
     "shoes",
     "hat",
     "bag",
@@ -20,7 +19,6 @@ SLOTS = (
 
 DRAW_ORDER = (
     "bottom",
-    "socks",
     "shoes",
     "top",
     "hat",
@@ -47,17 +45,12 @@ V2_FIXED_SLOTS = {
     "bottom": (0.20, 0.480, 0.72, 0.815),
     "bracelet": (0.01, 0.525, 0.17, 0.645),
     "bag": (0.73, 0.505, 0.99, 0.755),
-    # Socks share the lower band beside footwear instead of reserving a full
-    # row. This keeps an empty socks input from creating a large vertical gap
-    # and gives tall boots substantially more height without any overlap.
-    "socks": (0.09, 0.820, 0.25, 0.995),
     "shoes": (0.265, 0.820, 0.655, 0.995),
 }
 
 V2_DRAW_ORDER = (
     "top",
     "bottom",
-    "socks",
     "shoes",
     "hat",
     "earrings",
@@ -66,6 +59,14 @@ V2_DRAW_ORDER = (
     "bag",
     "bracelet",
 )
+
+# V3 keeps every proven V2 full-body box except the necklace.  Neckwear has
+# its own upper-right side slot, separated from both the top and the bag, so
+# it is shown as an independent product rather than styled on the neckline.
+V3_FIXED_SLOTS = {
+    **V2_FIXED_SLOTS,
+    "necklace": (0.77, 0.170, 0.99, 0.260),
+}
 
 # V3 starts from V2's exact tight-cutout placements, then resolves the two
 # semantically ambiguous garment boundaries against the *actual neighbouring
@@ -106,10 +107,12 @@ V3_TOP_FIXED_SLOTS = {
     "glasses": (0.25, 0.230, 0.75, 0.335),
     "earrings_left": (0.07, 0.230, 0.25, 0.335),
     "earrings_right": (0.75, 0.230, 0.93, 0.335),
-    # Neckwear keeps Round 13's lower centre point, but is reined in one step
-    # so chains and scarves remain subordinate to the garment neckline.
-    "necklace": (0.28, 0.350, 0.72, 0.550),
-    "top": (0.015, 0.345, 0.985, 0.995),
+    # The main garment retains the full upper-body height while reserving a
+    # narrow right-hand product column for neckwear.  The two hard boxes are
+    # deliberately disjoint: necklaces are references beside the garment,
+    # never styling overlays on its neckline.
+    "necklace": (0.785, 0.350, 0.985, 0.550),
+    "top": (0.015, 0.345, 0.765, 0.995),
 }
 
 V3_TOP_DRAW_ORDER = (
@@ -305,7 +308,6 @@ TEMPLATE = {
         # guide rectangles get their vertical ranges after packing.
         "top": (0.10, 0.18, 0.74, 0.99),
         "bottom": (0.18, 0.18, 0.72, 0.99),
-        "socks": (0.27, 0.18, 0.63, 0.99),
         # The target character is deliberately stylised (roughly five heads
         # tall), so headwear and footwear need more visual weight than they
         # would in a realistic adult template.
@@ -405,6 +407,18 @@ class OutfitReferenceComposer:
     RETURN_NAMES = ("outfit_reference",)
     FUNCTION = "compose"
     CATEGORY = "Outfit Reference"
+
+    @staticmethod
+    def _validate_image_inputs(images, supported_slots=SLOTS):
+        unsupported = sorted(
+            slot
+            for slot, tensor in images.items()
+            if slot not in supported_slots and tensor is not None
+        )
+        if unsupported:
+            raise ValueError(
+                "unsupported outfit image inputs: " + ", ".join(unsupported)
+            )
 
     @staticmethod
     def _image(tensor):
@@ -707,47 +721,6 @@ class OutfitReferenceComposer:
         label = f"bottom {waist}/{length}/{silhouette}"
         return (x, y, target_width, target_height), hard, label
 
-    def _socks_placement(self, cutout, layout, bottom_layout, width, height, bottom_present=False):
-        bottom_length = self._choice(
-            bottom_layout,
-            "length",
-            "" if not bottom_present else "floor",
-            {"", *TEMPLATE["landmarks"]["bottom_height"]},
-            {"full": "floor"},
-        )
-        if bottom_present and not bottom_length:
-            bottom_length = "floor"
-        if bottom_present and bottom_length not in {"thigh", "knee"}:
-            raise ValueError(
-                "socks cannot share the leg region with a calf/ankle/floor bottom; "
-                "set the connected bottom length to thigh/knee or omit socks"
-            )
-        sock_length = self._choice(
-            layout,
-            "length",
-            "mid_calf",
-            {"ankle", "crew", "mid_calf", "knee", "knee_high"},
-        )
-        hard = self._normal_box_to_pixels(TEMPLATE["hard_boxes"]["socks"], width, height)
-        box_width, box_height = hard[2] - hard[0], hard[3] - hard[1]
-        desired_height = {
-            "knee": 0.145,
-            "knee_high": 0.145,
-            "mid_calf": 0.12,
-            "crew": 0.095,
-            "ankle": 0.07,
-        }.get(sock_length, 0.12) * height
-        target_width, target_height = self._uniform_size(
-            cutout,
-            desired_height / max(1.0, cutout.height),
-            box_width,
-            min(box_height, int(round(height * 0.15))),
-        )
-        x = hard[0] + (box_width - target_width) // 2
-        y = int(round(0.72 * height))
-        y = min(max(y, hard[1]), hard[3] - target_height)
-        return (x, y, target_width, target_height), hard, f"socks {sock_length}"
-
     def _box_placement(self, slot, cutout, layout, width, height):
         box_name = slot
         side = None
@@ -847,10 +820,6 @@ class OutfitReferenceComposer:
                 fraction = {"high": 0.028, "mid": 0.036, "low": 0.045}.get(waist, 0.036)
             else:
                 fraction = 0.012
-        elif previous == "bottom" and current == "socks":
-            fraction = 0.010
-        elif previous == "socks" and current == "shoes":
-            fraction = 0.008
         elif previous == "bottom" and current == "shoes":
             length = str(layouts.get("bottom", {}).get("length", "floor")).strip().lower()
             fraction = {
@@ -874,7 +843,7 @@ class OutfitReferenceComposer:
         top. If a connected chain is too tall, every present main item receives
         the same additional scale.
         """
-        sequence = [slot for slot in ("top", "bottom", "socks", "shoes") if slot in placements]
+        sequence = [slot for slot in ("top", "bottom", "shoes") if slot in placements]
         if not sequence:
             return placements
         main_bottom = int(round(TEMPLATE["main_bottom_y"] * height))
@@ -892,7 +861,6 @@ class OutfitReferenceComposer:
                 if (
                     slot == "shoes"
                     and "bottom" not in placements
-                    and "socks" not in placements
                     and global_scale == 1.0
                 ):
                     # Preserve the exact fixed foot anchor (including integer
@@ -903,12 +871,8 @@ class OutfitReferenceComposer:
                 previous = None
                 if slot == "bottom" and "top" in packed and "top" in placements:
                     previous = "top"
-                elif slot == "socks" and "bottom" in packed and "bottom" in placements:
-                    previous = "bottom"
                 elif slot == "shoes":
-                    if "socks" in packed and "socks" in placements:
-                        previous = "socks"
-                    elif "bottom" in packed and "bottom" in placements:
+                    if "bottom" in packed and "bottom" in placements:
                         previous = "bottom"
                     else:
                         # Isolated shoes stay bottom-aligned in the fixed foot
@@ -922,8 +886,8 @@ class OutfitReferenceComposer:
                     previous_box = packed[previous][0]
                     gap_before = self._main_gap(previous, slot, layouts, height)
                     compact_y = previous_box[1] + previous_box[3] + gap_before
-                    # The waistband is a real hip-relative anchor. Socks and
-                    # shoes use their predecessor as the stronger anchor once
+                    # The waistband is a real hip-relative anchor. Shoes use
+                    # the preceding bottom as the stronger anchor once
                     # the corresponding garment chain exists.
                     y = max(desired_y, compact_y) if slot == "bottom" else compact_y
 
@@ -1083,6 +1047,7 @@ class OutfitReferenceComposer:
             draw.text((hard[0] + 4, hard[1] + 4), label, fill=red)
 
     def compose(self, outfit_spec, width, height, background, show_layout_guides=False, **images):
+        self._validate_image_inputs(images)
         items = self._parse(outfit_spec)
         colors = {
             "white": (255, 255, 255),
@@ -1120,15 +1085,6 @@ class OutfitReferenceComposer:
                 placements[slot] = self._top_placement(cutout, layout, width, height)
             elif slot == "bottom":
                 placements[slot] = self._bottom_placement(cutout, layout, width, height)
-            elif slot == "socks":
-                placements[slot] = self._socks_placement(
-                    cutout,
-                    layout,
-                    layouts.get("bottom", {}),
-                    width,
-                    height,
-                    images.get("bottom") is not None,
-                )
             elif slot == "earrings":
                 continue
             else:
@@ -1315,6 +1271,7 @@ class OutfitReferenceComposerV2(OutfitReferenceComposer):
         show_layout_guides=False,
         **images,
     ):
+        self._validate_image_inputs(images)
         colors = {
             "white": (255, 255, 255),
             "off_white": (248, 248, 245),
@@ -1425,7 +1382,7 @@ class OutfitReferenceComposerV3Top(OutfitReferenceComposerV2):
             row_names.add("hat")
         if active.intersection({"glasses", "earrings"}):
             row_names.add("face")
-        if active.intersection({"top", "necklace"}):
+        if "top" in active:
             row_names.add("top")
         rows = _allocate_active_rows(V3_TOP_ROWS, row_names)
         boxes = dict(V3_TOP_FIXED_SLOTS)
@@ -1441,11 +1398,6 @@ class OutfitReferenceComposerV3Top(OutfitReferenceComposerV2):
         if "top" in rows:
             boxes["top"] = _remap_box_y(
                 V3_TOP_FIXED_SLOTS["top"], V3_TOP_ROWS["top"], rows["top"]
-            )
-            boxes["necklace"] = _remap_box_y(
-                V3_TOP_FIXED_SLOTS["necklace"],
-                V3_TOP_ROWS["top"],
-                rows["top"],
             )
         return {
             name: cls._normal_box_to_pixels(box, width, height)
@@ -1562,7 +1514,7 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
     V3 does not infer semantics from pixels.  Wardrobe Library supplies the
     selected items' layout tags as a tiny JSON object, for example
     ``{"top":"top_coverwaist","bottom":"bottom_shoehalf"}``.  Missing semantic
-    rows collapse locally; a complete untagged set stays on the exact V2 path.
+    rows collapse locally; neckwear always uses V3's independent side slot.
     """
 
     @classmethod
@@ -1577,6 +1529,10 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
 
     FUNCTION = "compose_v3"
     CATEGORY = "Outfit Reference"
+
+    @classmethod
+    def _fixed_box(cls, box_name, width, height):
+        return cls._normal_box_to_pixels(V3_FIXED_SLOTS[box_name], width, height)
 
     @staticmethod
     def _parse_layout_tags(layout_tags_json):
@@ -1638,53 +1594,47 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
         if active.intersection({"glasses", "earrings"}):
             head_names.add("face")
         body_names = set()
-        if active.intersection({"top", "necklace"}):
+        if "top" in active:
             body_names.add("top")
         if "bottom" in active:
             body_names.add("bottom")
-        if active.intersection({"socks", "shoes"}):
+        if "shoes" in active:
             body_names.add("foot")
 
         head_rows = _allocate_active_rows(V3_FULL_HEAD_ROWS, head_names)
         body_rows = _allocate_active_rows(V3_FULL_BODY_ROWS, body_names)
-        boxes = dict(V2_FIXED_SLOTS)
+        boxes = dict(V3_FIXED_SLOTS)
         if "hat" in head_rows:
             boxes["hat"] = _remap_box_y(
-                V2_FIXED_SLOTS["hat"],
+                V3_FIXED_SLOTS["hat"],
                 V3_FULL_HEAD_ROWS["hat"],
                 head_rows["hat"],
             )
         if "face" in head_rows:
             for name in ("glasses", "earrings_left", "earrings_right"):
                 boxes[name] = _remap_box_y(
-                    V2_FIXED_SLOTS[name],
+                    V3_FIXED_SLOTS[name],
                     V3_FULL_HEAD_ROWS["face"],
                     head_rows["face"],
                 )
         if "top" in body_rows:
             boxes["top"] = _remap_box_y(
-                V2_FIXED_SLOTS["top"],
-                V3_FULL_BODY_ROWS["top"],
-                body_rows["top"],
-            )
-            boxes["necklace"] = _remap_box_y(
-                V2_FIXED_SLOTS["necklace"],
+                V3_FIXED_SLOTS["top"],
                 V3_FULL_BODY_ROWS["top"],
                 body_rows["top"],
             )
         if "bottom" in body_rows:
             boxes["bottom"] = _remap_box_y(
-                V2_FIXED_SLOTS["bottom"],
+                V3_FIXED_SLOTS["bottom"],
                 V3_FULL_BODY_ROWS["bottom"],
                 body_rows["bottom"],
             )
         if "foot" in body_rows:
-            for name in ("socks", "shoes"):
-                boxes[name] = _remap_box_y(
-                    V2_FIXED_SLOTS[name],
-                    V3_FULL_BODY_ROWS["foot"],
-                    body_rows["foot"],
-                )
+            boxes["shoes"] = _remap_box_y(
+                V3_FIXED_SLOTS["shoes"],
+                V3_FULL_BODY_ROWS["foot"],
+                body_rows["foot"],
+            )
         return {
             name: cls._normal_box_to_pixels(box, width, height)
             for name, box in boxes.items()
@@ -1855,14 +1805,14 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
     @staticmethod
     def _v3_draw_order(top_coverwaist, bottom_shoehalf):
         if top_coverwaist and bottom_shoehalf:
-            main = ("socks", "shoes", "bottom", "top")
+            main = ("shoes", "bottom", "top")
         elif top_coverwaist:
-            main = ("bottom", "top", "socks", "shoes")
+            main = ("bottom", "top", "shoes")
         elif bottom_shoehalf:
-            main = ("top", "socks", "shoes", "bottom")
+            main = ("top", "shoes", "bottom")
         else:
-            main = V2_DRAW_ORDER[:4]
-        return main + V2_DRAW_ORDER[4:]
+            main = V2_DRAW_ORDER[:3]
+        return main + V2_DRAW_ORDER[3:]
 
     def compose_v3(
         self,
@@ -1875,6 +1825,7 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
         layout_tags_json="{}",
         **images,
     ):
+        self._validate_image_inputs(images)
         tags = self._parse_layout_tags(layout_tags_json)
         top_coverwaist = (
             tags.get("top") == "top_coverwaist"
@@ -1888,20 +1839,6 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
         )
 
         complete_set = all(images.get(slot) is not None for slot in SLOTS)
-        # A complete, untagged outfit remains byte-for-byte on the proven V2
-        # path.  Dynamic compaction is only observable when a semantic row is
-        # actually empty.
-        if complete_set and not top_coverwaist and not bottom_shoehalf:
-            return self.compose_fixed(
-                width,
-                height,
-                background,
-                background_threshold,
-                slot_padding,
-                show_layout_guides,
-                **images,
-            )
-
         colors = {
             "white": (255, 255, 255),
             "off_white": (248, 248, 245),
