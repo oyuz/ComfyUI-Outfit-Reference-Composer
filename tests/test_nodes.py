@@ -29,12 +29,26 @@ class OutfitReferenceComposerTests(unittest.TestCase):
     def setUp(self):
         self.node = OutfitReferenceComposer()
 
-    def test_node_has_socks_input_and_one_output(self):
-        self.assertIn("socks", SLOTS)
+    def test_node_exposes_nine_non_sock_inputs_and_one_output(self):
+        self.assertEqual(len(SLOTS), 9)
+        self.assertNotIn("socks", SLOTS)
         optional = list(self.node.INPUT_TYPES()["optional"])
-        self.assertLess(optional.index("socks"), optional.index("shoes"))
+        self.assertEqual(optional, list(SLOTS))
+        self.assertIn("shoes", optional)
         self.assertEqual(self.node.RETURN_TYPES, ("IMAGE",))
         self.assertEqual(self.node.RETURN_NAMES, ("outfit_reference",))
+
+    def test_removed_socks_input_is_rejected(self):
+        removed = image_tensor(Image.new("RGBA", (64, 64), (80, 80, 80, 255)))
+        with self.assertRaisesRegex(ValueError, "unsupported outfit image inputs: socks"):
+            self.node.compose(
+                '{"items": {}}',
+                768,
+                1024,
+                "white",
+                False,
+                socks=removed,
+            )
 
     def test_cutout_uses_source_alpha_and_keeps_existing_padding(self):
         image = Image.new("RGBA", (512, 512), (215, 215, 215, 0))
@@ -232,7 +246,6 @@ class OutfitReferenceComposerTests(unittest.TestCase):
         cutouts = {
             "top": Image.new("RGBA", (400, 360), (80, 80, 80, 255)),
             "bottom": Image.new("RGBA", (340, 360), (80, 80, 80, 255)),
-            "socks": Image.new("RGBA", (220, 300), (230, 230, 230, 255)),
             "shoes": Image.new("RGBA", (300, 350), (80, 80, 80, 255)),
         }
         layouts = {
@@ -244,16 +257,12 @@ class OutfitReferenceComposerTests(unittest.TestCase):
                 "length": "knee",
                 "silhouette": "straight",
             },
-            "socks": {"length": "mid_calf"},
             "shoes": {"size": "large"},
         }
         all_placements = {
             "top": self.node._top_placement(cutouts["top"], layouts["top"], 768, 1024),
             "bottom": self.node._bottom_placement(
                 cutouts["bottom"], layouts["bottom"], 768, 1024
-            ),
-            "socks": self.node._socks_placement(
-                cutouts["socks"], layouts["socks"], layouts["bottom"], 768, 1024, True
             ),
             "shoes": self.node._box_placement(
                 "shoes", cutouts["shoes"], layouts["shoes"], 768, 1024
@@ -307,53 +316,6 @@ class OutfitReferenceComposerTests(unittest.TestCase):
         self.assertEqual(len(placements), 1)
         glasses_right = round(TEMPLATE["hard_boxes"]["glasses"][2] * 768)
         self.assertGreaterEqual(placements[0][1][0], glasses_right)
-
-    def test_long_bottom_with_socks_is_rejected(self):
-        cutout = Image.new("RGBA", (200, 350), (230, 230, 230, 255))
-        with self.assertRaisesRegex(ValueError, "calf/ankle/floor"):
-            self.node._socks_placement(
-                cutout,
-                {"length": "mid_calf"},
-                {"garment_type": "pants", "length": "floor"},
-                768,
-                1024,
-                True,
-            )
-
-    def test_long_skirt_with_socks_is_rejected(self):
-        cutout = Image.new("RGBA", (200, 350), (230, 230, 230, 255))
-        with self.assertRaisesRegex(ValueError, "calf/ankle/floor"):
-            self.node._socks_placement(
-                cutout,
-                {"length": "mid_calf"},
-                {"garment_type": "skirt", "length": "ankle"},
-                768,
-                1024,
-                True,
-            )
-
-    def test_connected_bottom_without_metadata_rejects_socks(self):
-        cutout = Image.new("RGBA", (200, 350), (230, 230, 230, 255))
-        with self.assertRaisesRegex(ValueError, "calf/ankle/floor"):
-            self.node._socks_placement(cutout, {"length": "crew"}, {}, 768, 1024, True)
-
-    def test_short_bottom_and_socks_are_packed_without_overlap(self):
-        bottom = Image.new("RGBA", (360, 250), (80, 80, 80, 255))
-        socks = Image.new("RGBA", (220, 300), (230, 230, 230, 255))
-        layouts = {
-            "bottom": {"garment_type": "shorts", "fit": "loose", "waist": "low", "length": "knee", "silhouette": "wide"},
-            "socks": {"length": "mid_calf"},
-        }
-        placements = {
-            "bottom": self.node._bottom_placement(bottom, layouts["bottom"], 768, 1024),
-            "socks": self.node._socks_placement(
-                socks, layouts["socks"], layouts["bottom"], 768, 1024, True
-            ),
-        }
-        packed = self.node._pack_main(placements, layouts, 768, 1024)
-        bottom_box = packed["bottom"][0]
-        socks_box = packed["socks"][0]
-        self.assertGreaterEqual(socks_box[1] - (bottom_box[1] + bottom_box[3]), 8)
 
     def test_compose_accepts_direct_item_fields(self):
         product = Image.new("RGBA", (256, 256), (0, 0, 0, 0))

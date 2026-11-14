@@ -128,9 +128,9 @@ class OutfitReferenceComposerV3TopTests(unittest.TestCase):
         )[0]
         self.assertEqual(tuple(guided.shape), (1, 1024, 1024, 3))
 
-    def test_v2_public_contract_is_unchanged(self):
+    def test_v2_public_contract_has_nine_slots_without_socks(self):
         expected_slots = (
-            "top", "bottom", "socks", "shoes", "hat", "bag",
+            "top", "bottom", "shoes", "hat", "bag",
             "glasses", "necklace", "earrings", "bracelet",
         )
         expected_boxes = {
@@ -143,17 +143,18 @@ class OutfitReferenceComposerV3TopTests(unittest.TestCase):
             "bottom": (0.20, 0.480, 0.72, 0.815),
             "bracelet": (0.01, 0.525, 0.17, 0.645),
             "bag": (0.73, 0.505, 0.99, 0.755),
-            "socks": (0.09, 0.820, 0.25, 0.995),
             "shoes": (0.265, 0.820, 0.655, 0.995),
         }
         expected_draw_order = (
-            "top", "bottom", "socks", "shoes", "hat", "earrings",
+            "top", "bottom", "shoes", "hat", "earrings",
             "glasses", "necklace", "bag", "bracelet",
         )
         self.assertEqual(SLOTS, expected_slots)
         self.assertEqual(V2_OUTFIT_CENTER_X, 0.46)
         self.assertEqual(V2_FIXED_SLOTS, expected_boxes)
         self.assertEqual(V2_DRAW_ORDER, expected_draw_order)
+        self.assertNotIn("socks", V2_FIXED_SLOTS)
+        self.assertNotIn("socks", V2_DRAW_ORDER)
         self.assertEqual(list(self.v2.INPUT_TYPES()["optional"]), list(expected_slots))
         self.assertEqual(self.v2.FUNCTION, "compose_fixed")
         self.assertEqual(self.v2.RETURN_TYPES, ("IMAGE",))
@@ -175,7 +176,7 @@ class OutfitReferenceComposerV3TopTests(unittest.TestCase):
                     **{slot: product_tensor()},
                 )
 
-    def test_v3_top_uses_freed_canvas_and_one_center_axis(self):
+    def test_v3_top_uses_freed_canvas_and_side_necklace_column(self):
         for name, box in V3_TOP_FIXED_SLOTS.items():
             with self.subTest(name=name):
                 self.assertTrue(all(0.0 <= value <= 1.0 for value in box))
@@ -186,13 +187,13 @@ class OutfitReferenceComposerV3TopTests(unittest.TestCase):
         v2_top = V2_FIXED_SLOTS["top"]
         v3_area = (v3_top[2] - v3_top[0]) * (v3_top[3] - v3_top[1])
         v2_area = (v2_top[2] - v2_top[0]) * (v2_top[3] - v2_top[1])
-        self.assertGreater(v3_area, 3.5 * v2_area)
+        self.assertGreater(v3_area, 2.5 * v2_area)
         self.assertLessEqual(min(box[0] for box in V3_TOP_FIXED_SLOTS.values()), 0.04)
         self.assertGreaterEqual(max(box[2] for box in V3_TOP_FIXED_SLOTS.values()), 0.96)
         self.assertLessEqual(min(box[1] for box in V3_TOP_FIXED_SLOTS.values()), 0.005)
         self.assertGreaterEqual(max(box[3] for box in V3_TOP_FIXED_SLOTS.values()), 0.995)
 
-        for slot in ("hat", "glasses", "necklace", "top"):
+        for slot in ("hat", "glasses"):
             box = V3_TOP_FIXED_SLOTS[slot]
             self.assertAlmostEqual((box[0] + box[2]) / 2, V3_TOP_CENTER_X)
         hat = V3_TOP_FIXED_SLOTS["hat"]
@@ -202,29 +203,22 @@ class OutfitReferenceComposerV3TopTests(unittest.TestCase):
         self.assertGreaterEqual(
             (hat[3] - hat[1]) / (v3_top[3] - v3_top[1]), 0.33
         )
-        self.assertGreaterEqual(necklace[2] - necklace[0] + 1e-9, 0.44)
+        self.assertGreaterEqual(necklace[2] - necklace[0] + 1e-9, 0.20)
         self.assertGreaterEqual(necklace[3] - necklace[1] + 1e-9, 0.20)
         self.assertGreaterEqual(necklace[1], 0.35)
         self.assertAlmostEqual((necklace[1] + necklace[3]) / 2, 0.45)
-        self.assertGreaterEqual(
-            (necklace[1] + necklace[3]) / 2 - v3_top[1], 0.10
-        )
+        self.assertGreaterEqual(necklace[0], v3_top[2] + 0.015)
         self.assertLessEqual(
             V3_TOP_FIXED_SLOTS["glasses"][1] - V3_TOP_FIXED_SLOTS["hat"][3],
             0.005 + 1e-9,
         )
-        self.assertLessEqual(
-            V3_TOP_FIXED_SLOTS["necklace"][1] - V3_TOP_FIXED_SLOTS["glasses"][3],
-            0.015 + 1e-9,
-        )
+        self.assertFalse(overlaps(necklace, v3_top))
 
-    def test_only_necklace_overlaps_top_and_renders_last(self):
-        allowed = frozenset(("top", "necklace"))
+    def test_necklace_is_disjoint_from_top_and_renders_in_side_column(self):
         for left, right in combinations(V3_TOP_FIXED_SLOTS, 2):
             with self.subTest(left=left, right=right):
-                self.assertEqual(
-                    overlaps(V3_TOP_FIXED_SLOTS[left], V3_TOP_FIXED_SLOTS[right]),
-                    frozenset((left, right)) == allowed,
+                self.assertFalse(
+                    overlaps(V3_TOP_FIXED_SLOTS[left], V3_TOP_FIXED_SLOTS[right])
                 )
         self.assertGreater(
             V3_TOP_DRAW_ORDER.index("necklace"), V3_TOP_DRAW_ORDER.index("top")
@@ -232,16 +226,34 @@ class OutfitReferenceComposerV3TopTests(unittest.TestCase):
 
         top = product_tensor((920, 710), (230, 20, 20, 255))
         necklace = product_tensor((340, 145), (20, 70, 230, 255))
-        top_only = self.v3.compose_top(
-            1000, 1000, "white", 24, 0, False, top=top
-        )[0][0].numpy()
         overlaid = self.v3.compose_top(
             1000, 1000, "white", 24, 0, False, top=top, necklace=necklace
         )[0][0].numpy()
-        top_red = (top_only[..., 0] > 0.8) & (top_only[..., 2] < 0.2)
+        top_red = (overlaid[..., 0] > 0.8) & (overlaid[..., 2] < 0.2)
         necklace_blue = (overlaid[..., 2] > 0.8) & (overlaid[..., 0] < 0.2)
         self.assertGreater(int(np.count_nonzero(top_red)), 100)
         self.assertGreater(int(np.count_nonzero(necklace_blue)), 100)
+        top_y, top_x = np.nonzero(top_red)
+        necklace_y, necklace_x = np.nonzero(necklace_blue)
+        self.assertGreaterEqual(int(necklace_x.min()), int(top_x.max()) + 1)
+
+    def test_necklace_only_keeps_side_slot_and_content_crop(self):
+        necklace = product_tensor((300, 420), (20, 70, 230, 255))
+        cutout = self.v3._cutout(
+            self.v3._image(necklace), "necklace", {"background_threshold": 24}
+        )
+        boxes = self.v3._dynamic_boxes({"necklace": cutout}, 1000, 1000)
+        placement, _ = self.v3._fit_dynamic_slot(
+            cutout, "necklace", boxes, 0
+        )
+        self.assertGreaterEqual(placement[0], 780)
+        output = self.v3.compose_top(
+            1000, 1000, "white", 24, 0, False, necklace=necklace
+        )[0]
+        self.assertLess(output.shape[1], 1000)
+        self.assertLess(output.shape[2], 1000)
+        self.assertEqual(output.shape[1] % 64, 0)
+        self.assertEqual(output.shape[2] % 64, 0)
 
     def test_pair_earrings_use_separate_symmetric_boxes(self):
         left = V3_TOP_FIXED_SLOTS["earrings_left"]

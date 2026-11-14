@@ -47,7 +47,22 @@ class OutfitReferenceComposerV2Tests(unittest.TestCase):
         inputs = self.node.INPUT_TYPES()
         self.assertNotIn("outfit_spec", inputs["required"])
         self.assertEqual(list(inputs["optional"]), list(SLOTS))
-        self.assertLess(list(inputs["optional"]).index("socks"), list(inputs["optional"]).index("shoes"))
+        self.assertEqual(len(inputs["optional"]), 9)
+        self.assertNotIn("socks", inputs["optional"])
+        self.assertIn("shoes", inputs["optional"])
+
+    def test_removed_socks_input_is_rejected(self):
+        removed = rgba_tensor(Image.new("RGBA", (64, 64), (80, 80, 80, 255)))
+        with self.assertRaisesRegex(ValueError, "unsupported outfit image inputs: socks"):
+            self.node.compose_fixed(
+                768,
+                1024,
+                "white",
+                24,
+                8,
+                False,
+                socks=removed,
+            )
 
     def test_fixed_boxes_only_allow_necklace_to_overlap_top(self):
         allowed_overlap = frozenset(("top", "necklace"))
@@ -146,19 +161,15 @@ class OutfitReferenceComposerV2Tests(unittest.TestCase):
         self.assertGreaterEqual(top[1] - glasses[3], 0.0)
         self.assertLessEqual(top[1] - glasses[3], 0.01)
 
-    def test_socks_sit_left_of_taller_narrower_footwear_box(self):
+    def test_footwear_keeps_the_existing_lower_band_geometry(self):
         bottom = V2_FIXED_SLOTS["bottom"]
-        socks = V2_FIXED_SLOTS["socks"]
         shoes = V2_FIXED_SLOTS["shoes"]
-        self.assertGreaterEqual(socks[1] - bottom[3], 0.0)
-        self.assertLessEqual(socks[1] - bottom[3], 0.01)
+        self.assertNotIn("socks", V2_FIXED_SLOTS)
+        self.assertEqual(shoes, (0.265, 0.820, 0.655, 0.995))
         self.assertGreaterEqual(shoes[1] - bottom[3], 0.0)
         self.assertLessEqual(shoes[1] - bottom[3], 0.01)
-        self.assertLessEqual(socks[2], shoes[0])
-        self.assertEqual((socks[1], socks[3]), (shoes[1], shoes[3]))
         self.assertLessEqual(shoes[2] - shoes[0], 0.40)
         self.assertGreaterEqual(shoes[3] - shoes[1] + 1e-9, 0.17)
-        self.assertGreaterEqual(socks[3] - socks[1] + 1e-9, 0.15)
 
     def test_tall_boot_uses_full_footwear_height_without_distortion(self):
         boot = Image.new("RGBA", (240, 600), (80, 50, 30, 255))

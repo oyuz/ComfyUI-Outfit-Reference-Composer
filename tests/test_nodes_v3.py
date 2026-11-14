@@ -21,6 +21,7 @@ from nodes import (  # noqa: E402
     V2_FIXED_SLOTS,
     V3_BOTTOM_SHOEHALF_COVER_FRACTION,
     V3_BOTTOM_SHOEHALF_SEAM_OVERLAP_FRACTION,
+    V3_FIXED_SLOTS,
     V3_TOP_COVERWAIST_HIP_FRACTION,
 )
 
@@ -82,12 +83,19 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
     def test_v3_appends_one_metadata_input_after_the_v2_image_inputs(self):
         optional = list(self.v3.INPUT_TYPES()["optional"])
         self.assertEqual(optional[:-1], list(SLOTS))
+        self.assertNotIn("socks", optional)
         self.assertEqual(optional[-1], "layout_tags_json")
         self.assertTrue(
             self.v3.INPUT_TYPES()["optional"]["layout_tags_json"][1]["forceInput"]
         )
 
-    def test_complete_untagged_set_is_pixel_identical_to_v2(self):
+    def test_removed_socks_input_is_rejected_instead_of_ignored(self):
+        with self.assertRaisesRegex(
+            ValueError, "unsupported outfit image inputs: socks"
+        ):
+            self.render_v3(socks=rgba_tensor((160, 220), (80, 90, 100, 255)))
+
+    def test_complete_untagged_set_uses_v3_side_necklace_and_full_canvas(self):
         images = {
             slot: rgba_tensor(
                 (180 + index * 9, 160 + index * 13),
@@ -95,7 +103,24 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             )
             for index, slot in enumerate(SLOTS)
         }
-        self.assertTrue(torch.equal(self.render_v2(**images), self.render_v3(**images)))
+        v2 = self.render_v2(**images)
+        v3 = self.render_v3(**images)
+        self.assertEqual(tuple(v3.shape), (1, 1000, 1000, 3))
+        self.assertFalse(torch.equal(v2, v3))
+
+        cutouts = {
+            slot: self.v3._cutout(
+                self.v3._image(tensor), slot, {"background_threshold": 24}
+            )
+            for slot, tensor in images.items()
+        }
+        boxes = self.v3._dynamic_boxes(cutouts, 1000, 1000)
+        placements, _ = self.v3._v3_relative_placements(
+            cutouts, 1000, 1000, 0, False, False, boxes
+        )
+        top_box = self.v3._placement_box(placements["top"])
+        necklace_box = self.v3._placement_box(placements["necklace"])
+        self.assertGreaterEqual(necklace_box[0], top_box[2])
 
     def test_incomplete_untagged_set_compacts_and_crops(self):
         images = self.images()
@@ -142,6 +167,26 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
                     boxes[name],
                     self.v3._normal_box_to_pixels(V2_FIXED_SLOTS[name], 1536, 2048),
                 )
+        self.assertEqual(
+            boxes["necklace"],
+            self.v3._normal_box_to_pixels(V3_FIXED_SLOTS["necklace"], 1536, 2048),
+        )
+
+    def test_necklace_only_stays_in_side_slot_and_crops_safely(self):
+        necklace = rgba_tensor((240, 180), (20, 70, 230, 255))
+        cutout = self.v3._cutout(
+            self.v3._image(necklace), "necklace", {"background_threshold": 24}
+        )
+        boxes = self.v3._dynamic_boxes({"necklace": cutout}, 1000, 1000)
+        placement, _ = self.v3._fit_dynamic_slot(
+            cutout, "necklace", boxes, 0
+        )
+        self.assertGreaterEqual(placement[0], 760)
+        output = self.render_v3(necklace=necklace)
+        self.assertLess(output.shape[1], 1000)
+        self.assertLess(output.shape[2], 1000)
+        self.assertEqual(output.shape[1] % 64, 0)
+        self.assertEqual(output.shape[2] % 64, 0)
 
     def test_empty_face_row_is_reused_by_hat(self):
         hat = {"hat": Image.new("RGBA", (120, 80), (30, 40, 50, 255))}
@@ -415,8 +460,8 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
 
     def test_draw_order_puts_the_covering_item_on_top(self):
         self.assertEqual(
-            self.v3._v3_draw_order(True, True)[:4],
-            ("socks", "shoes", "bottom", "top"),
+            self.v3._v3_draw_order(True, True)[:3],
+            ("shoes", "bottom", "top"),
         )
         self.assertGreater(
             self.v3._v3_draw_order(True, False).index("top"),
