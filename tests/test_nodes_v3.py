@@ -20,7 +20,6 @@ from nodes import (  # noqa: E402
     V2_DRAW_ORDER,
     V2_FIXED_SLOTS,
     V3_BOTTOM_SHOEHALF_COVER_FRACTION,
-    V3_BOTTOM_SHOEHALF_SEAM_OVERLAP_FRACTION,
     V3_FIXED_SLOTS,
     V3_TOP_COVERWAIST_HIP_FRACTION,
 )
@@ -248,7 +247,7 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
             ):
                 self.render_v3(payload, **self.images())
 
-    def test_relative_placements_target_hip_and_shoe_thirds(self):
+    def test_relative_placements_target_hip_and_shoe_half(self):
         images = self.images()
         cutouts = {
             slot: self.v3._cutout(
@@ -276,17 +275,13 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
         expected_shoe_boundary = shoe_top + round(
             shoe_height * V3_BOTTOM_SHOEHALF_COVER_FRACTION
         )
-        expected_visible_hem = expected_shoe_boundary + max(
-            1,
-            round(shoe_height * V3_BOTTOM_SHOEHALF_SEAM_OVERLAP_FRACTION),
-        )
         self.assertEqual(top_bottom, expected_hip)
         visible_bbox = self.v3._visible_alpha_bbox(cutouts["bottom"])
         mapped_visible_hem = bottom_placement[1] + (
             visible_bbox[3] * bottom_placement[3] / cutouts["bottom"].height
         )
-        self.assertGreaterEqual(mapped_visible_hem, expected_visible_hem)
-        self.assertLess(mapped_visible_hem, expected_visible_hem + 1.1)
+        self.assertGreaterEqual(mapped_visible_hem, expected_shoe_boundary)
+        self.assertLess(mapped_visible_hem, expected_shoe_boundary + 1.1)
 
         # Tagged garments retain V2's upper edge and their semantic centre
         # axis while scaling uniformly to the neighbouring item.
@@ -367,59 +362,59 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
         expected_boundary = shoe_top + round(
             shoe_height * V3_BOTTOM_SHOEHALF_COVER_FRACTION
         )
-        self.assertGreater(mapped_hem, expected_boundary)
+        self.assertGreaterEqual(mapped_hem, expected_boundary)
+        self.assertLess(mapped_hem, expected_boundary + 1.1)
 
-    def test_shoe_layer_is_cropped_to_its_lower_third_at_same_scale(self):
-        shoe = self.v3._cutout(
-            self.v3._image(self.images()["shoes"]),
-            "shoes",
-            {"background_threshold": 24},
-        )
-        placement, _ = self.v3._fit_fixed_slot(shoe, "shoes", 1536, 2048, 10)
-        toe, toe_placement = self.v3._shoe_toe_third(shoe, placement)
-        boundary = placement[1] + round(
-            placement[3] * V3_BOTTOM_SHOEHALF_COVER_FRACTION
-        )
-        self.assertEqual(toe_placement[1], boundary)
-        self.assertEqual(toe_placement[0], placement[0])
-        self.assertEqual(toe_placement[2], placement[2])
-        self.assertEqual(
-            toe_placement[1] + toe_placement[3],
-            placement[1] + placement[3],
-        )
-        source_aspect = toe.width / toe.height
-        placed_aspect = toe_placement[2] / toe_placement[3]
-        self.assertAlmostEqual(placed_aspect, source_aspect, delta=0.08)
-
-    def test_shoe_pixels_cannot_leak_above_the_toe_third(self):
-        images = self.images()
+    def test_full_shoe_is_drawn_then_pants_cover_its_centre(self):
+        images = {
+            "bottom": rgba_tensor((120, 700), (20, 180, 50, 255)),
+            "shoes": rgba_tensor((400, 300), (20, 60, 230, 255)),
+        }
         cutouts = {
             slot: self.v3._cutout(
                 self.v3._image(tensor), slot, {"background_threshold": 24}
             )
             for slot, tensor in images.items()
         }
+        boxes = self.v3._dynamic_boxes(cutouts, 1000, 1000)
         placements, _ = self.v3._v3_relative_placements(
-            cutouts, 1000, 1000, 0, True, True
-        )
-        _toe, toe_placement = self.v3._shoe_toe_third(
-            cutouts["shoes"], placements["shoes"]
+            cutouts, 1000, 1000, 0, False, True, boxes
         )
         pixels = self.render_v3(
-            json.dumps(
-                {"top": "top_coverwaist", "bottom": "bottom_shoehalf"}
-            ),
+            json.dumps({"bottom": "bottom_shoehalf"}),
             guides=True,
             **images,
         )[0].numpy()
-        blue = (
-            (pixels[..., 2] > 0.65)
-            & (pixels[..., 0] < 0.25)
-            & (pixels[..., 1] < 0.45)
+
+        shoe = placements["shoes"]
+        bottom = placements["bottom"]
+        self.assertLess(shoe[0], bottom[0])
+        self.assertGreater(shoe[0] + shoe[2], bottom[0] + bottom[2])
+        overlap_y = shoe[1] + max(2, shoe[3] // 6)
+        self.assertLess(
+            overlap_y,
+            shoe[1] + round(shoe[3] * V3_BOTTOM_SHOEHALF_COVER_FRACTION),
         )
-        visible_rows = np.flatnonzero(np.any(blue, axis=1))
-        self.assertGreater(visible_rows.size, 0)
-        self.assertGreaterEqual(int(visible_rows[0]), toe_placement[1])
+
+        row = pixels[overlap_y]
+        blue = (
+            (row[..., 2] > 0.65)
+            & (row[..., 0] < 0.25)
+            & (row[..., 1] < 0.45)
+        )
+        green = (
+            (row[..., 1] > 0.60)
+            & (row[..., 0] < 0.25)
+            & (row[..., 2] < 0.35)
+        )
+        # Green in the centre proves that the bottom is drawn over the shoe.
+        # Blue at the same upper-shoe row, outside the narrow trouser alpha,
+        # proves that the original full shoe was not source-cropped.
+        self.assertTrue(np.any(green[bottom[0] : bottom[0] + bottom[2]]))
+        self.assertTrue(np.any(blue[shoe[0] : bottom[0]]))
+        self.assertTrue(
+            np.any(blue[bottom[0] + bottom[2] : shoe[0] + shoe[2]])
+        )
 
     def test_visible_bottom_hem_fills_transparent_seam(self):
         output = self.v3.compose_v3(
@@ -451,8 +446,8 @@ class OutfitReferenceComposerV3Tests(unittest.TestCase):
 
         # The synthetic bottom cutout retains transparent padding.  V3 maps
         # the visible alpha hem (rather than the padded rectangle) to the
-        # nominal boundary, so the row immediately above it is garment rather
-        # than the off-white canvas.
+        # nominal half-height overlap boundary, so the row immediately above it
+        # is the garment while the complete shoe remains underneath.
         seam_pixel = output[nominal_boundary - 1, axis_x + 5]
         canvas = np.array([248, 248, 245], dtype=np.float32) / 255.0
         self.assertGreater(float(np.max(np.abs(seam_pixel - canvas))), 0.20)
