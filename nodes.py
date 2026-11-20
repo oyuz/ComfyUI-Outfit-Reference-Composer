@@ -72,15 +72,12 @@ V3_FIXED_SLOTS = {
 # semantically ambiguous garment boundaries against the *actual neighbouring
 # item*.  These fractions are object-relative, not canvas hard-box
 # coordinates: a top_coverwaist top reaches 30% into the placed bottom, and a
-# bottom_shoehalf bottom reaches the placed footwear's two-thirds line plus a tiny
-# seam guard.  Only the lower third of the shoe layer is retained so wide
-# shoes cannot leak around narrow trouser legs above the intended toe band.
+# bottom_shoehalf draws the complete footwear first, then extends the bottom
+# garment over the upper half of that placed image. The shoe source and its
+# placement are never cropped; any visible shoe around a narrower trouser hem
+# is the natural result of alpha compositing the garment on top.
 V3_TOP_COVERWAIST_HIP_FRACTION = 0.30
-V3_BOTTOM_SHOEHALF_COVER_FRACTION = 2.0 / 3.0
-# The footwear crop still starts at the exact two-thirds boundary.  Extend the
-# visible trouser hem a few pixels past that line so antialiasing and curved
-# shoe/toe silhouettes cannot expose the canvas between the two layers.
-V3_BOTTOM_SHOEHALF_SEAM_OVERLAP_FRACTION = 0.03
+V3_BOTTOM_SHOEHALF_COVER_FRACTION = 0.5
 V3_LAYOUT_TAGS = {
     "top": "top_coverwaist",
     "bottom": "bottom_shoehalf",
@@ -1719,27 +1716,17 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             target_hem = shoe_top + int(
                 round(shoe_height * V3_BOTTOM_SHOEHALF_COVER_FRACTION)
             )
-            seam_overlap = max(
-                1,
-                int(
-                    round(
-                        shoe_height * V3_BOTTOM_SHOEHALF_SEAM_OVERLAP_FRACTION
-                    )
-                ),
-            )
-            visible_target_hem = target_hem + seam_overlap
             bottom_cutout = cutouts["bottom"]
             # ``_cutout`` deliberately leaves a small transparent safety pad.
-            # Anchor the *visible alpha hem* to the semantic two-thirds line,
-            # rather than anchoring the padded image rectangle there.  This
-            # prevents the canvas from appearing as a white seam while keeping
-            # the shoe crop strictly limited to its lower third.
+            # Anchor the *visible alpha hem* to the half-height overlap line,
+            # rather than anchoring the padded image rectangle there. The
+            # complete shoe remains underneath and is never source-cropped.
             visible_bbox = self._visible_alpha_bbox(bottom_cutout)
             visible_hem = visible_bbox[3] if visible_bbox else bottom_cutout.height
             base_y = placements["bottom"][1]
             padded_target_bottom = base_y + int(
                 np.ceil(
-                    (visible_target_hem - base_y)
+                    (target_hem - base_y)
                     * bottom_cutout.height
                     / max(1, visible_hem)
                 )
@@ -1775,32 +1762,6 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             )
 
         return placements, hard_boxes
-
-    @staticmethod
-    def _shoe_toe_third(cutout, placement):
-        """Return only the lower shoe third at its original placed scale.
-
-        Cropping the source and placement together (rather than hiding it
-        behind a narrow trouser cutout) guarantees no shoe upper can leak at
-        the sides above the semantic two-thirds coverage line.
-        """
-        source_start = int(
-            round(cutout.height * V3_BOTTOM_SHOEHALF_COVER_FRACTION)
-        )
-        source_start = min(max(0, source_start), cutout.height - 1)
-        x, y, target_width, target_height = placement
-        target_start = int(
-            round(target_height * V3_BOTTOM_SHOEHALF_COVER_FRACTION)
-        )
-        target_start = min(max(0, target_start), target_height - 1)
-        toe = cutout.crop((0, source_start, cutout.width, cutout.height))
-        toe_placement = (
-            x,
-            y + target_start,
-            target_width,
-            target_height - target_start,
-        )
-        return toe, toe_placement
 
     @staticmethod
     def _v3_draw_order(top_coverwaist, bottom_shoehalf):
@@ -1891,10 +1852,7 @@ class OutfitReferenceComposerV3(OutfitReferenceComposerV2):
             hard = hard_boxes[slot]
             render_cutout = cutout
             label = slot
-            if slot == "shoes" and bottom_shoehalf:
-                render_cutout, placement = self._shoe_toe_third(cutout, placement)
-                label += " / toe 1/3"
-            elif slot == "top" and top_coverwaist:
+            if slot == "top" and top_coverwaist:
                 label += " / top_coverwaist"
             elif slot == "bottom" and bottom_shoehalf:
                 label += " / bottom_shoehalf"
